@@ -32,6 +32,7 @@ import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
@@ -298,29 +299,48 @@ internal fun SlippyPixelMap(
                     val scy = hPx / 2 + (m.ny - centerY) * pxPerN
                     return floor((scx - phaseAX) / cellA).toInt() to floor((scy - phaseAY) / cellA).toInt()
                 }
-                // Cluster catches into the map-anchored cells: ONE phosphor pixel per occupied cell,
-                // brighter when several share it. Zooming out merges them; zooming in separates them.
-                val counts = HashMap<Long, Int>()
+                // Group markers by map-anchored cell, preserving all CaptureEntry data so we
+                // can color-code by status: cracked > crackable > partial > other.
+                val cellCaptures = HashMap<Long, MutableList<CaptureEntry>>()
                 markers.forEach {
                     val (cx, cy) = cellXY(it)
                     val k = (cx.toLong() shl 32) or (cy.toLong() and 0xFFFFFFFFL)
-                    counts[k] = (counts[k] ?: 0) + 1
+                    cellCaptures.getOrPut(k) { mutableListOf() }.add(it.cap)
                 }
-                counts.forEach { (k, cnt) ->
+                cellCaptures.forEach { (k, caps) ->
                     val cx = (k shr 32).toInt(); val cy = k.toInt()
                     val gx = cx * cellA + phaseAX; val gy = cy * cellA + phaseAY
                     if (gx < -cellA || gy < -cellA || gx > wPx || gy > hPx) return@forEach
-                    drawRect(
-                        if (cnt > 1) Color(0x9C, 0xFF, 0xB8) else Color(0x3D, 0xFF, 0x6E),  // brighter = cluster
-                        topLeft = Offset(gx, gy), size = Size(cellA, cellA),
-                    )
+                    val cnt = caps.size
+                    val center = Offset(gx + cellA / 2, gy + cellA / 2)
+                    // Status priority: cracked (bright green) > crackable (lime) > partial (orange) > dim green.
+                    val dotColor = when {
+                        caps.any { it.isCracked }    -> Color(0x3D, 0xFF, 0x6E)
+                        caps.any { it.isCrackable }  -> Color(0xBB, 0xFF, 0x44)
+                        caps.any { it.isPartial }    -> Color(0xFF, 0xA5, 0x33)
+                        else                         -> Color(0x26, 0xAA, 0x55)
+                    }
+                    val r = cellA * (if (cnt > 1) 0.85f else 0.60f)
+                    // Outer glow ring — signals there's something to tap.
+                    drawCircle(dotColor.copy(alpha = 0.30f), radius = r + cellA * 0.5f, center = center)
+                    // Filled circle.
+                    drawCircle(dotColor, radius = r, center = center)
+                    // Inner ring border for crispness against the dark tile background.
+                    drawCircle(Color.Black.copy(alpha = 0.45f), radius = r, center = center, style = Stroke(width = 1.2f))
+                    // White centre dot on clusters — indicates more than one catch here.
+                    if (cnt > 1) drawCircle(Color.White.copy(alpha = 0.85f), radius = r * 0.28f, center = center)
                 }
-                // You: orange, on top.
+                // You: GPS crosshair — outer translucent ring + bright centre dot (distinct from catches).
                 you?.let { m ->
                     val (cx, cy) = cellXY(m)
                     val gx = cx * cellA + phaseAX; val gy = cy * cellA + phaseAY
-                    if (gx >= -cellA && gy >= -cellA && gx <= wPx && gy <= hPx)
-                        drawRect(Color(0xFF, 0xA5, 0x33), topLeft = Offset(gx, gy), size = Size(cellA, cellA))
+                    if (gx >= -cellA && gy >= -cellA && gx <= wPx && gy <= hPx) {
+                        val center = Offset(gx + cellA / 2, gy + cellA / 2)
+                        drawCircle(Color(0xFF, 0xA5, 0x33, 0x55), radius = cellA * 1.4f, center = center)
+                        drawCircle(Color(0xFF, 0xA5, 0x33), radius = cellA * 0.55f, center = center)
+                        drawCircle(Color(0xFF, 0xA5, 0x33), radius = cellA * 0.55f, center = center, style = Stroke(width = 1.5f))
+                        drawCircle(Color.White, radius = cellA * 0.22f, center = center)
+                    }
                 }
             }
         }

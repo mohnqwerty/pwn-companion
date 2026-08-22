@@ -24,6 +24,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.Canvas
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
@@ -226,11 +227,15 @@ fun CapturesDetailScreen(
                     Text(
                         buildAnnotatedString {
                             append("map · $geoCount geolocated   ")
-                            withStyle(SpanStyle(color = Color(0xFF3DFF6E))) { append("■") }
+                            withStyle(SpanStyle(color = Color(0xFF3DFF6E))) { append("●") }
+                            append(" cracked  ")
+                            withStyle(SpanStyle(color = Color(0xFFBBFF44))) { append("●") }
+                            append(" crackable  ")
+                            withStyle(SpanStyle(color = Color(0xFF26AA55))) { append("●") }
                             append(" catch")
                             if (hasFix) {
                                 append("   ")
-                                withStyle(SpanStyle(color = Color(0xFFFFA533))) { append("■") }
+                                withStyle(SpanStyle(color = Color(0xFFFFA533))) { append("●") }
                                 append(" you")
                             }
                         },
@@ -1281,18 +1286,37 @@ private fun PixelBasemap(
                                 drawRect(Color(v, v, v), topLeft = Offset(ox + c * cw, oy + r * cw), size = Size(sq, sq))
                             }
                         }
-                        // Catches: bright green, same gapped square size as the basemap so the
-                        // markers sit ON the grid instead of overflowing it (was drawn at full
-                        // cell width `cw`, which made them larger than the map pixels).
-                        val green = Color(0x3D, 0xFF, 0x6E)
-                        for (i in g.catchCells) {
+                        // Catches: WiGLE-style circles, color-coded by status.
+                        // catchByCell already groups all CaptureEntry objects per cell so we can
+                        // pick the right color without a second pass over the full capture list.
+                        val uniqueCells = g.catchCells.toSet()
+                        for (i in uniqueCells) {
                             val c = i % g.cols; val r = i / g.cols
-                            drawRect(green, topLeft = Offset(ox + c * cw, oy + r * cw), size = Size(sq, sq))
+                            val caps = g.catchByCell[i] ?: continue
+                            val cnt = caps.size
+                            val cx = ox + c * cw + cw / 2; val cy = oy + r * cw + cw / 2
+                            val center = Offset(cx, cy)
+                            val radius = sq / 2f * (if (cnt > 1) 0.90f else 0.65f)
+                            val dotColor = when {
+                                caps.any { it.isCracked }   -> Color(0x3D, 0xFF, 0x6E)
+                                caps.any { it.isCrackable } -> Color(0xBB, 0xFF, 0x44)
+                                caps.any { it.isPartial }   -> Color(0xFF, 0xA5, 0x33)
+                                else                        -> Color(0x26, 0xAA, 0x55)
+                            }
+                            drawCircle(dotColor.copy(alpha = 0.28f), radius = radius + sq * 0.35f, center = center)
+                            drawCircle(dotColor, radius = radius, center = center)
+                            drawCircle(Color.Black.copy(alpha = 0.40f), radius = radius, center = center, style = Stroke(width = 1f))
+                            if (cnt > 1) drawCircle(Color.White.copy(alpha = 0.85f), radius = radius * 0.28f, center = center)
                         }
-                        // You: orange — a warm colour clearly distinct from the green catches.
+                        // You: GPS crosshair — outer ring + bright filled dot + white core.
                         youCell?.let { i ->
                             val c = i % g.cols; val r = i / g.cols
-                            drawRect(Color(0xFF, 0xA5, 0x33), topLeft = Offset(ox + c * cw, oy + r * cw), size = Size(sq, sq))
+                            val cx = ox + c * cw + cw / 2; val cy = oy + r * cw + cw / 2
+                            val center = Offset(cx, cy)
+                            drawCircle(Color(0xFF, 0xA5, 0x33, 0x55), radius = sq * 0.85f, center = center)
+                            drawCircle(Color(0xFF, 0xA5, 0x33), radius = sq * 0.45f, center = center)
+                            drawCircle(Color(0xFF, 0xA5, 0x33), radius = sq * 0.45f, center = center, style = Stroke(width = 1.2f))
+                            drawCircle(Color.White, radius = sq * 0.18f, center = center)
                         }
                     }
                 }
