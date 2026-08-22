@@ -361,14 +361,14 @@ WEBSOCKET_CONNECT_TIMEOUT = 5.0
 # otherwise hang until the library ping-timeout fires (tens of seconds).
 WEBSOCKET_SEND_TIMEOUT = 5.0
 # Keepalive so a silently-dropped BT link is detected in seconds, not by default.
-WEBSOCKET_PING_INTERVAL = 15.0
-WEBSOCKET_PING_TIMEOUT = 10.0
+WEBSOCKET_PING_INTERVAL = 8.0
+WEBSOCKET_PING_TIMEOUT = 6.0
 WEBSOCKET_CLOSE_TIMEOUT = 3.0
 
 # Connection retry configuration
 INITIAL_RETRY_DELAY = 1  # seconds
-MAX_RETRY_DELAY = 30  # seconds
-RETRY_BACKOFF_FACTOR = 1.5
+MAX_RETRY_DELAY = 10  # seconds
+RETRY_BACKOFF_FACTOR = 1.3
 DISCOVERY_LOOP_SLEEP = 0.1  # seconds
 
 # Request timeouts

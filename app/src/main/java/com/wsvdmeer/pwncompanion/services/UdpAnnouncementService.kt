@@ -189,7 +189,7 @@ class UdpAnnouncementService(
                             }
                         }
 
-                        delay(5000) // Wait 5 seconds between announcements
+                        delay(2000) // 2s: fast rediscovery after reconnect
                     } catch (e: CancellationException) {
                         // Job was cancelled — exit the loop cleanly without logging as an error
                         throw e

@@ -81,7 +81,7 @@ class NetworkService(private val context: Context) {
     // Debouncing for BNEP0 state changes to prevent rapid flapping
     // This prevents "br-connection-busy" errors from too many start/stop cycles
     private val lastStateChangeTime = AtomicLong(0)
-    private val stateChangeThrottleMs = 5000L  // ✅ CRITICAL FIX: Increased from 2s to 5s for stability
+    private val stateChangeThrottleMs = 3000L  // 3s: fast enough for mission reconnects, slow enough to avoid br-connection-busy
     private var lastBnep0State: Boolean? = null  // Track last known state to avoid duplicate callbacks
     private var lastBnep0Ip: String? = null  // Track last IP to detect IP changes on reconnect
 
@@ -216,8 +216,8 @@ class NetworkService(private val context: Context) {
                     Log.i(tag, "   Force stopping old server to clean up port bindings...")
                     stop()
                     // Wait for port to be released from TIME_WAIT state
-                    Log.i(tag, "   Waiting 5s for port to be released from TIME_WAIT...") // ✅ CRITICAL FIX: Increased to 5s
-                    delay(5000)  // ✅ CRITICAL FIX: Increased from 3000ms to 5000ms
+                    Log.i(tag, "   Waiting 3s for port to be released from TIME_WAIT...")
+                    delay(3000)
                     Log.i(tag, "   Starting fresh with new IP: $currentIp")
                 }
                 lastBnep0Ip = currentIp
@@ -260,7 +260,7 @@ class NetworkService(private val context: Context) {
         healthCheckJob?.cancel()
         healthCheckJob = scope.launch {
             while (isActive) {
-                delay(12_000)
+                delay(5_000)
                 try {
                     if (!networkingDesired) continue
                     val bnepUp = bluetoothMonitor.getBnep0InterfaceIp() != null

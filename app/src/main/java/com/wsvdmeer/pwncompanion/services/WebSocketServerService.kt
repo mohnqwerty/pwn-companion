@@ -85,8 +85,8 @@ class WebSocketServerService(
                         // the session itself when a ping goes unanswered within `timeout`, which
                         // frees the slot and lets the plugin's own reconnect land a fresh session
                         // instead of piling up against a zombie one.
-                        pingPeriod = java.time.Duration.ofSeconds(15)
-                        timeout = java.time.Duration.ofSeconds(20)
+                        pingPeriod = java.time.Duration.ofSeconds(8)
+                        timeout = java.time.Duration.ofSeconds(12)
                     }
                     configureRouting(::handleWebSocketSession)
                 }.start(wait = false)
