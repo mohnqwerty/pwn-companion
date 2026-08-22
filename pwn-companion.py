@@ -475,7 +475,12 @@ class PwnCompanion(Plugin):
         self.start_time = time.time()
         # Where pwnagotchi stores captured handshakes (+ our .gps.json sidecars).
         # Scanned on connect to seed the app with the historical capture log.
-        self.handshakes_dir = "/home/pi/handshakes"
+        # /root/handshakes matches current pwnagotchi (bettercap.handshakes default);
+        # overwritten from the real agent config in _set_agent() the moment an agent
+        # event first fires, unless the user pins it via the handshakes_dir option —
+        # so this hardcoded value only matters for the brief window before that.
+        self.handshakes_dir = "/root/handshakes"
+        self._handshakes_dir_resolved = False
 
         # Device info — pwnagotchi.name() returns the name from config.toml main.name
         try:
@@ -775,9 +780,30 @@ class PwnCompanion(Plugin):
         except Exception as e:
             log.debug(f"[pwn-companion] Bad voice pool payload: {e}")
 
+    def _set_agent(self, agent):
+        """Stash the live agent reference and, on the first call, resolve the real
+        handshakes directory from pwnagotchi's own config (agent.config()['bettercap']
+        ['handshakes']) instead of trusting our hardcoded guess. A plugin-supplied
+        handshakes_dir option always wins and skips this lookup entirely.
+        """
+        self._agent = agent
+        if self._handshakes_dir_resolved or "handshakes_dir" in self.options:
+            return
+        try:
+            real_dir = agent.config().get("bettercap", {}).get("handshakes")
+            if real_dir and real_dir != self.handshakes_dir:
+                log.info(
+                    f"[pwn-companion] handshakes dir from agent config: {real_dir} "
+                    f"(was assuming {self.handshakes_dir})"
+                )
+                self.handshakes_dir = real_dir
+            self._handshakes_dir_resolved = True
+        except Exception as e:
+            log.debug(f"[pwn-companion] Could not resolve handshakes dir from agent config: {e}")
+
     def on_bt_tether_connected(self, agent, event_data):
         """Handle bt-tether connected event - start discovery"""
-        self._agent = agent  # Store for auto-tune access
+        self._set_agent(agent)  # Store for auto-tune access + resolve real handshakes dir
         try:
             ip = event_data.get("ip")
             iface = event_data.get("interface")
@@ -822,7 +848,7 @@ class PwnCompanion(Plugin):
 
     def on_handshake(self, agent, filename, access_point, client_station):
         """Save GPS data and fire AI event when a handshake is captured"""
-        self._agent = agent
+        self._set_agent(agent)
         try:
             ssid = access_point.get("hostname", "") or access_point.get("essid", "unknown")
             security = "WPA2"  # pwnagotchi primarily captures WPA2
@@ -1204,7 +1230,7 @@ class PwnCompanion(Plugin):
 
     def on_association(self, agent, ap):
         """Fire network_event when Pwnagotchi associates with an AP"""
-        self._agent = agent
+        self._set_agent(agent)
         try:
             ssid = ap.get("hostname", "") or ap.get("essid", "unknown")
             channel = ap.get("channel", 0)
@@ -1230,7 +1256,7 @@ class PwnCompanion(Plugin):
 
     def on_deauthentication(self, agent, ap, station):
         """Fire AI event when Pwnagotchi sends a deauth packet"""
-        self._agent = agent
+        self._set_agent(agent)
         try:
             channel = ap.get("channel", 0) if isinstance(ap, dict) else 0
             ssid = (ap.get("hostname", "") or ap.get("essid", "")) if isinstance(ap, dict) else str(ap)
@@ -1260,7 +1286,7 @@ class PwnCompanion(Plugin):
         epoch_data contains: channel, num_deauths, num_associations, num_handshakes, etc.
         This runs every epoch (~60s) and is the most reliable source of channel efficiency.
         """
-        self._agent = agent
+        self._set_agent(agent)
         try:
             # Fallback discovery start: if no bt-tether event ever started us but a
             # Bluetooth-PAN interface is up, begin discovery anyway so we can connect.
@@ -2616,7 +2642,7 @@ class PwnCompanion(Plugin):
 
     def on_mood(self, agent, mood):
         """Legacy/generic mood hook (some forks) — delegate to the emitter."""
-        self._agent = agent
+        self._set_agent(agent)
         try:
             mood_name = (
                 getattr(mood, "name", None)
@@ -2630,7 +2656,7 @@ class PwnCompanion(Plugin):
 
     def on_manual_mode(self, agent):
         """Called when pwnagotchi switches to MANUAL mode — notify app to pause learning"""
-        self._agent = agent
+        self._set_agent(agent)
         self._current_mode = "MANUAL"
         log.info("[pwn-companion]  Mode → MANUAL (no scanning)")
         if self.app_connected and self.loop:
@@ -2638,7 +2664,7 @@ class PwnCompanion(Plugin):
 
     def on_auto_mode(self, agent):
         """Called when pwnagotchi switches to AUTO mode — notify app to resume scanning+learning"""
-        self._agent = agent
+        self._set_agent(agent)
         self._current_mode = "AUTO"
         log.info("[pwn-companion]  Mode → AUTO (scanning active)")
         if self.app_connected and self.loop:

@@ -44,6 +44,12 @@ class GpsService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.wsvdmeer.pwncompanion.GPS_STOP"
+        // How much worse (meters) a new fix must NOT be than the kept one to still replace it.
+        private const val GPS_ACCURACY_HYSTERESIS_M = 15f
+        // A kept fix older than this is treated as stale — a worse-but-fresh fix (e.g. NETWORK
+        // after GPS signal is lost indoors/underground) is allowed through rather than freezing
+        // the map on a fix that's minutes old.
+        private const val GPS_STALE_FIX_MS = 30_000L
     }
 
     override fun onCreate() {
@@ -262,8 +268,23 @@ class GpsService : Service() {
      */
     private fun handleLocationUpdate(location: Location) {
         try {
-            Log.d(tag, "Location update: lat=${location.latitude}, lon=${location.longitude}, accuracy=${location.accuracy}m")
-            
+            // Both GPS_PROVIDER and NETWORK_PROVIDER feed this same listener. NETWORK fixes
+            // (cell/wifi trilateration) can be off by hundreds of meters to kilometers, so
+            // accepting whichever provider merely fires LAST silently downgrades an accurate
+            // GPS fix and yanks the map pin for the next capture far from the real spot. Keep
+            // a fix unless the new one is meaningfully better, or the old one has gone stale
+            // (a real GPS fix expires/the provider drops out and we fall back to network).
+            val prev = lastLocation
+            if (prev != null &&
+                location.accuracy > prev.accuracy + GPS_ACCURACY_HYSTERESIS_M &&
+                location.time - prev.time < GPS_STALE_FIX_MS
+            ) {
+                Log.d(tag, "Discarding worse fix: new accuracy=${location.accuracy}m > kept ${prev.accuracy}m (provider=${location.provider})")
+                return
+            }
+
+            Log.d(tag, "Location update: lat=${location.latitude}, lon=${location.longitude}, accuracy=${location.accuracy}m, provider=${location.provider}")
+
             // Store last known location
             lastLocation = location
 

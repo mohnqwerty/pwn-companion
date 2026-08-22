@@ -77,7 +77,17 @@ class WebSocketServerService(
                 Log.i(tag, "Starting WebSocket server (attempt $attempts/$maxAttempts) on ws://0.0.0.0:$serverPort (announce $announcedIp)")
 
                 server = embeddedServer(CIO, port = serverPort, host = "0.0.0.0") {
-                    install(WebSockets)
+                    install(WebSockets) {
+                        // Without a pingPeriod the server never probes the peer — a half-open
+                        // socket (BT radio drops the link without a clean TCP close, common on
+                        // the Pi Zero's shared BT/WiFi chip) sits in `incoming.receive()` forever,
+                        // so the app keeps showing "connected" against a dead session. Ktor closes
+                        // the session itself when a ping goes unanswered within `timeout`, which
+                        // frees the slot and lets the plugin's own reconnect land a fresh session
+                        // instead of piling up against a zombie one.
+                        pingPeriod = java.time.Duration.ofSeconds(15)
+                        timeout = java.time.Duration.ofSeconds(20)
+                    }
                     configureRouting(::handleWebSocketSession)
                 }.start(wait = false)
 
