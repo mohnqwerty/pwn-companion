@@ -4,6 +4,34 @@ All significant changes to PwnCompanion, most recent first.
 
 ---
 
+## v1.2.5 (build 11) — 2026-08-23
+
+App `1.2.5` (build 11) · plugin `2.1.0`
+
+### Connection — smartwatch-strength link reliability
+| Area | Detail |
+|------|--------|
+| Dead-link detection | WS ping 15 s → 8 s, timeout 10 s → 6 s — dead link detected in ≤14 s instead of ≤25 s |
+| Health check | Server self-heal poll 12 s → 5 s — port-drop caught and rebound faster |
+| BT bounce tolerance | State-change throttle 5 s → 3 s — real reconnects no longer silently dropped on brief BT blips |
+| UDP rediscovery | Announce interval 5 s → 2 s — Pi finds the phone in ≤2 s after a drop |
+| Plugin reconnect | Max retry delay 30 s → 10 s, backoff factor 1.5 → 1.3 — Pi retries much sooner |
+| IP-change restart | TIME_WAIT wait 5 s → 3 s (probeListening covers the rest) |
+
+### Map — WiGLE-style capture markers
+| Area | Detail |
+|------|--------|
+| Circle markers | Flat squares replaced with filled circles + outer glow rings — each pin is immediately visible against the map background |
+| Status color coding | `● bright green` cracked · `● lime` crackable · `● orange` partial · `● dim green` other — see crack status at a glance without tapping |
+| Cluster indicator | Multiple catches at the same zoom cell show a white centre dot so you know there's more than one network there; zoom in to separate them |
+| GPS crosshair | "You" marker upgraded from a flat orange square to a translucent ring + solid dot + white core — clearly distinct from catch pins |
+| Legend updated | Map legend uses ● coloured dots matching the new markers |
+
+### Data persistence
+Captures already persist to `filesDir/captures.json` via CaptureStore across reconnects and app restarts — no data is wiped on BT link drops.
+
+---
+
 ## Session — 2026-08-20 (new-pwnagotchi pcapng · mode-switch guard)
 
 App `1.2.4` (build 10) · plugin `2.1.0`
