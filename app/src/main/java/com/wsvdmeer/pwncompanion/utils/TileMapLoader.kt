@@ -181,16 +181,15 @@ object TileMapLoader {
         if (x < 0 || y < 0 || x >= n || y >= n) return null
         val cacheDir = File(context.cacheDir, "tilecache").apply { mkdirs() }
         // Prefix with the tile style so switching sources doesn't serve stale cached tiles.
-        val f = File(cacheDir, "cd_${z}_${x}_${y}.png")
+        val f = File(cacheDir, "ca_${z}_${x}_${y}.png")
         if (f.exists() && f.length() > 0) {
             BitmapFactory.decodeFile(f.absolutePath)?.let { return it }
         }
         return try {
-            // Carto "dark_nolabels": dark land, light roads, no text. Recolors to clean
-            // green streets on black — far higher contrast for the phosphor look than
-            // standard OSM tiles (which are light-on-light and average to green mush).
-            // Free for reasonable use with "© OpenStreetMap © CARTO" attribution.
-            val url = "https://a.basemaps.cartocdn.com/dark_nolabels/$z/$x/$y.png"
+            // Carto "dark_all": dark land, light roads and readable street labels — a clean,
+            // Google-Maps-like basemap that fits the app's dark theme while keeping locations
+            // legible. Free for reasonable use with "© OpenStreetMap © CARTO" attribution.
+            val url = "https://a.basemaps.cartocdn.com/dark_all/$z/$x/$y.png"
             val req = Request.Builder().url(url).header("User-Agent", USER_AGENT).build()
             http.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) {
