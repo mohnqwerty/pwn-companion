@@ -19,6 +19,7 @@ import com.wsvdmeer.pwncompanion.presentation.theme.PwnCompanionTheme
 import com.wsvdmeer.pwncompanion.services.CompanionBackgroundService
 import com.wsvdmeer.pwncompanion.services.NetworkService
 import com.wsvdmeer.pwncompanion.services.NetworkServiceSingleton
+import com.wsvdmeer.pwncompanion.utils.DiagnosticsLog
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
@@ -77,6 +78,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Log.i(tag, "MainActivity created")
+        DiagnosticsLog.init(applicationContext)
+        DiagnosticsLog.log("MainActivity", "app started — v${com.wsvdmeer.pwncompanion.BuildConfig.VERSION_NAME} (build ${com.wsvdmeer.pwncompanion.BuildConfig.VERSION_CODE})")
+        installCrashLogger()
 
         // The voice is fully on-device + deterministic now (no model download) — go
         // straight to the console.
@@ -87,6 +91,18 @@ class MainActivity : ComponentActivity() {
 
         // Request ALL required permissions before starting GPS / foreground service
         requestAllPermissions()
+    }
+
+    /** Log uncaught crashes to the diagnostics log before the process dies. */
+    private fun installCrashLogger() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            runCatching {
+                DiagnosticsLog.log("crash", "FATAL ${throwable::class.java.name}: ${throwable.message}\n" +
+                    throwable.stackTrace.joinToString("\n"))
+            }
+            previous?.uncaughtException(thread, throwable)
+        }
     }
 
     /**

@@ -1,5 +1,6 @@
 package com.wsvdmeer.pwncompanion.presentation.ui
 
+import android.content.Intent
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -13,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -34,6 +36,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.platform.LocalContext
 import com.wsvdmeer.pwncompanion.ai.BlendedVoice
 import com.wsvdmeer.pwncompanion.ai.Franchise
+import com.wsvdmeer.pwncompanion.utils.DiagnosticsLog
 import com.wsvdmeer.pwncompanion.utils.NotifSettings
 import com.wsvdmeer.pwncompanion.utils.VoiceSettings
 import androidx.compose.ui.Modifier
@@ -45,6 +48,8 @@ import androidx.compose.ui.unit.sp
 import com.wsvdmeer.pwncompanion.models.LearningStats
 import com.wsvdmeer.pwncompanion.presentation.MainViewModel
 import com.wsvdmeer.pwncompanion.presentation.theme.TerminalMono
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlin.math.roundToInt
 
 /** Shared header row for a detail screen: "[ title ]" ........ "[ back ]". */
@@ -378,6 +383,79 @@ fun SettingsScreen(
         Spacer(Modifier.height(16.dp))
         VoiceRotationSection(showTitle = true, onOpenLines = onOpenVoiceLines)
         Spacer(Modifier.height(24.dp))
+
+        Spacer(Modifier.height(16.dp))
+        Text("[ DIAGNOSTICS ]", color = primary, fontWeight = FontWeight.Bold, fontSize = 12.sp, letterSpacing = 2.sp, fontFamily = TerminalMono)
+        Spacer(Modifier.height(4.dp))
+        DiagnosticsSection(primary, dim, onSurface)
+        Spacer(Modifier.height(24.dp))
+    }
+}
+
+/**
+ * On-device diagnostics log: view the recent tail, share the full file, or clear it. Lets the
+ * operator export the app's Bluetooth/WebSocket/device-message history to analyze reboots, BT
+ * drops, or a device idling in "listening" mode.
+ */
+@Composable
+private fun DiagnosticsSection(primary: Color, dim: Color, onSurface: Color) {
+    val context = LocalContext.current
+    LaunchedEffect(Unit) { DiagnosticsLog.init(context) }
+
+    var showLog by remember { mutableStateOf(false) }
+    var logText by remember { mutableStateOf<String?>(null) }
+    var sizeBytes by remember { mutableStateOf(0L) }
+
+    fun refreshSize() { sizeBytes = DiagnosticsLog.sizeBytes() }
+    LaunchedEffect(Unit) { refreshSize() }
+
+    // (Re)load the tail whenever the viewer is opened.
+    LaunchedEffect(showLog) {
+        if (showLog) {
+            logText = null
+            logText = withContext(Dispatchers.IO) { DiagnosticsLog.readTail(3000) }
+        }
+    }
+
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(22.dp)) {
+        Text("[ view ]", color = if (showLog) primary else dim, fontSize = 13.sp, fontFamily = TerminalMono,
+            modifier = Modifier.clickable { showLog = !showLog })
+        Text("[ share ]", color = dim, fontSize = 13.sp, fontFamily = TerminalMono,
+            modifier = Modifier.clickable {
+                val intent = DiagnosticsLog.shareIntent()
+                if (intent != null) {
+                    runCatching { context.startActivity(Intent.createChooser(intent, "share diagnostics log")) }
+                }
+            })
+        Text("[ clear ]", color = dim, fontSize = 13.sp, fontFamily = TerminalMono,
+            modifier = Modifier.clickable {
+                DiagnosticsLog.clear()
+                refreshSize()
+                logText = null
+            })
+    }
+
+    val sizeKb = (sizeBytes / 1024.0).let { if (it >= 1024.0) "%.1f MB".format(it / 1024.0) else "%.1f KB".format(it) }
+    Text("log size $sizeKb · share exports the full file", color = dim, fontSize = 10.sp, fontFamily = TerminalMono)
+    Spacer(Modifier.height(6.dp))
+
+    if (showLog) {
+        val txt = logText
+        if (txt == null) {
+            Text("loading…", color = dim, fontSize = 11.sp, fontFamily = TerminalMono)
+        } else {
+            Text(
+                txt.ifBlank { "(empty log — events appear once the pwnagotchi connects)" },
+                color = onSurface.copy(alpha = 0.85f),
+                fontSize = 9.sp,
+                lineHeight = 12.sp,
+                fontFamily = TerminalMono,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 360.dp)
+                    .verticalScroll(rememberScrollState()),
+            )
+        }
     }
 }
 

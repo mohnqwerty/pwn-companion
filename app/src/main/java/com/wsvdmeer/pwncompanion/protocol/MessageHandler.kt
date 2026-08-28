@@ -2,6 +2,7 @@ package com.wsvdmeer.pwncompanion.protocol
 
 import android.util.Log
 import com.wsvdmeer.pwncompanion.models.ScreenData
+import com.wsvdmeer.pwncompanion.utils.DiagnosticsLog
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -162,12 +163,44 @@ class MessageHandler {
     suspend fun handleIncomingMessage(deviceId: String, message: ScreenData) {
         try {
             Log.d(tag, "Handling incoming message: type=${message.type}, device=$deviceId")
+            DiagnosticsLog.log("device/$deviceId", summarize(message))
             messageProcessor.processMessage(deviceId, message)
             totalMessagesProcessed.incrementAndGet()
         } catch (e: Exception) {
             Log.e(tag, "Error handling incoming message: ${e.message}", e)
+            DiagnosticsLog.log("device/$deviceId", "ERROR processing type=${message.type}: ${e.message}")
             totalMessagesErrors.incrementAndGet()
         }
+    }
+
+    /** Compact, safe summary of an incoming device message (never the base64 image payload). */
+    private fun summarize(m: ScreenData): String = when (m.type) {
+        ScreenData.TYPE_IMAGE ->
+            "image: ${m.data?.length ?: 0} chars b64, contentType=${m.contentType}"
+        ScreenData.TYPE_STATUS ->
+            "status: status=${m.status} name=${m.resolvedDeviceName} mood=${m.pwnagotchiMood} " +
+                "mode=${m.pwnagotchiMode} wpaSec(on=${m.wpaSecEnabled} dl=${m.wpaSecDownload} online=${m.wpaSecOnline}) " +
+                "invert=${m.uiInvert} files=${m.totalFiles} msg=${m.message}"
+        ScreenData.TYPE_NETWORK_EVENT ->
+            "network_event: type=${m.eventType} net=${m.network} ch=${m.channel} bssid=${m.bssid} " +
+                "sta=${m.station} sig=${m.signal} count=${m.count} total=${m.totalCaptures} reason=${m.reason} " +
+                "desc=${m.eventDescription}"
+        ScreenData.TYPE_DEVICE_TELEMETRY ->
+            "telemetry: temp=${m.temperature} cpu=${m.cpuLoad} mem=${m.memUsage} reward=${m.reward} " +
+                "aps=${m.numAps} sta=${m.numSta} peers=${m.numPeers} epoch=${m.epoch} handshakes=${m.totalHandshakes} " +
+                "active=${m.activeForEpochs} inactive=${m.inactiveForEpochs} bored=${m.boredForEpochs} " +
+                "sad=${m.sadForEpochs} blind=${m.blindForEpochs}"
+        ScreenData.TYPE_AUTOTUNE ->
+            "autotune: best=${m.autotuneBestChannel} minRssi=${m.autotuneMinRssi} channels=${m.autotuneChannels?.size ?: 0}"
+        ScreenData.TYPE_CAPTURE_HISTORY ->
+            "capture_history: captures=${m.captures?.size ?: 0} files=${m.totalFiles}"
+        ScreenData.TYPE_CRACKED ->
+            "cracked: ${m.crackedResults?.size ?: 0} result(s)" +
+                (m.crackedResults?.joinToString(prefix = " [", postfix = "]") { it.bssid } ?: "")
+        ScreenData.TYPE_GPS -> "gps: lat=${m.latitude} lon=${m.longitude} acc=${m.accuracy}"
+        ScreenData.TYPE_GPS_REQUEST, ScreenData.TYPE_GPS_RECEIVED, ScreenData.TYPE_READY ->
+            m.type
+        else -> "type=${m.type} status=${m.status} msg=${m.message}"
     }
 
     /**
