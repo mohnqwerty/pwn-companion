@@ -167,7 +167,10 @@ internal fun SlippyPixelMap(
 
             // Project a normalized (nx, ny) point to its current screen position.
             fun project(nx: Double, ny: Double) =
-                Offset(wPx / 2 + (nx - centerX) * pxPerN, hPx / 2 + (ny - centerY) * pxPerN)
+                Offset(
+                    (wPx / 2f + (nx - centerX) * pxPerN).toFloat(),
+                    (hPx / 2f + (ny - centerY) * pxPerN).toFloat(),
+                )
 
             // Tile layer — full-resolution, no pixel effect. FilterQuality.High keeps underlay
             // tiles smooth while finer levels stream in.
