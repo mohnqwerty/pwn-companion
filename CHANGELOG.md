@@ -4,6 +4,31 @@ All significant changes to PwnCompanion, most recent first.
 
 ---
 
+## v1.2.7 (build 13) — 2026-08-28
+
+App `1.2.7` (build 13) · plugin `2.2.0`
+
+### Map — clear locations, dark basemap, no clutter
+| Area | Detail |
+|------|--------|
+| Keyless tiles | Dropped CARTO (now watermarks tiles with "map key required") for standard OpenStreetMap tiles — free, no API key, with © OpenStreetMap attribution |
+| Dark night mode | OSM tiles recolored to a dark night mode via a ColorMatrix — street labels dimmed, roads kept, capture pins pop |
+| Label-free pins | Removed the SSID/count/"you" text badges above pins — capture pins are clean colored dots (cracked green · crackable lime · partial orange) |
+
+### Diagnostics — export what's happening
+| Area | Detail |
+|------|--------|
+| On-device log | New rolling, timestamped `DiagnosticsLog` (`filesDir/logs/pwncompanion.log`, rotates at 4 MB) covering Bluetooth tether up/down, WebSocket connect/disconnect, every incoming device message (status/mode/mood/telemetry/network events/captures/cracked), errors, and uncaught crashes |
+| Settings → [ DIAGNOSTICS ] | **view** (last 3000 lines), **share** (full file via FileProvider), **clear** — to analyze pwnagotchi reboots, BT drops, and idle "listening" state |
+
+### Plugin — reliable wpa-sec uploads (v2.2.0)
+| Area | Detail |
+|------|--------|
+| Direct upload | The stock wpa-sec plugin misses `.pcapng` captures and partial grabs that later upgrade; pwn-companion now uploads crackable (eapol/pmkid) captures to wpa-sec directly — immediately on handshake + periodic re-sweep |
+| Key handling | Key read from config (`wpa_sec_key` option, else the stock wpa-sec plugin's `key`/`api_key`) — never hardcoded; disable with `wpa_sec_upload = false` |
+
+---
+
 ## v1.2.6 (build 12) — 2026-08-28
 
 App `1.2.6` (build 12) · plugin `2.1.0`
