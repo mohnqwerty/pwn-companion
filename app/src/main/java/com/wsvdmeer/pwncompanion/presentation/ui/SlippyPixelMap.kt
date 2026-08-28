@@ -308,7 +308,7 @@ internal fun SlippyPixelMap(
         }
         Spacer(Modifier.height(2.dp))
         Text(
-            "drag to pan · pinch to zoom · tap a capture · double-tap to reset",
+            "drag to pan · pinch to zoom · tap a capture · double-tap to reset · © OpenStreetMap",
             color = dim.copy(alpha = 0.6f), fontSize = 9.sp, fontFamily = TerminalMono,
         )
     }
