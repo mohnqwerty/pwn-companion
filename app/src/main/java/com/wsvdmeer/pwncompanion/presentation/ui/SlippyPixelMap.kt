@@ -1,11 +1,7 @@
 package com.wsvdmeer.pwncompanion.presentation.ui
 
 import android.graphics.Bitmap
-import android.graphics.RenderEffect
-import android.graphics.RuntimeShader
-import android.os.Build
 import androidx.compose.foundation.Canvas
-import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.BoxWithConstraints
@@ -25,19 +21,20 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.FilterQuality
-import androidx.compose.ui.graphics.asComposeRenderEffect
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.drawText
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -49,7 +46,6 @@ import com.wsvdmeer.pwncompanion.utils.TileMapLoader
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlin.math.PI
-import kotlin.math.abs
 import kotlin.math.ceil
 import kotlin.math.cos
 import kotlin.math.floor
@@ -67,44 +63,24 @@ private fun latToNy(lat: Double): Double {
     return (1.0 - ln(tan(r) + 1.0 / cos(r)) / PI) / 2.0
 }
 
-/** Phosphor-pixel post effect on the TILE layer only: snap to a fixed screen-space cell, then map
- *  luminance (Carto dark tiles: dark land / lighter streets) to a dark→grey ramp with a faint green
- *  tint. Constant cell size = pixels stay the same on screen at every zoom, so detail flows through
- *  them like a real map. Markers are drawn ABOVE this, so they keep their green / orange colours. */
-private const val PIXEL_SHADER = """
-uniform shader content;
-uniform float cellA;
-uniform float cellB;
-uniform float2 phaseA;
-uniform float2 phaseB;
-uniform float blend;
-half3 phos(half4 s) {
-    float l = s.r * 0.299 + s.g * 0.587 + s.b * 0.114;
-    // land ~0.02 → near-black; streets low-mid → grey with a faint phosphor-green tint.
-    float t = smoothstep(0.045, 0.28, l);
-    return mix(half3(0.02, 0.03, 0.03), half3(0.42, 0.52, 0.44), t);
-}
-half4 main(float2 coord) {
-    // Two map-anchored pixel grids: coarse (cellA, cellPx→2·cellPx across the level) and fine
-    // (cellB = cellA/2). Crossfade by `blend` = frac(zoom) so the pixel size transitions smoothly
-    // across a tile-level boundary instead of popping (fine grid at blend=1 == coarse at next level).
-    float2 ca = (floor((coord - phaseA) / cellA) + 0.5) * cellA + phaseA;
-    float2 cb = (floor((coord - phaseB) / cellB) + 0.5) * cellB + phaseB;
-    half3 a = phos(content.eval(ca));
-    half3 b = phos(content.eval(cb));
-    return half4(mix(a, b, blend), 1.0);
-}
-"""
-
 private class Marker(val nx: Double, val ny: Double, val cap: CaptureEntry)
 
+/** Status-priority colour for a set of captures: cracked > crackable > partial > other. */
+private fun statusColor(caps: List<CaptureEntry>): Color = when {
+    caps.any { it.isCracked }   -> Color(0x3D, 0xFF, 0x6E)
+    caps.any { it.isCrackable } -> Color(0xBB, 0xFF, 0x44)
+    caps.any { it.isPartial }   -> Color(0xFF, 0xA5, 0x33)
+    else                        -> Color(0x26, 0xAA, 0x55)
+}
+
 /**
- * Continuous slippy-map renderer with the phosphor-pixel look: a real tile pyramid drawn under a
- * live GPU pan/zoom transform, deeper tiles streaming in seamlessly as you zoom, and a screen-space
- * pixel shader on top. Smooth like gmaps/OSM; markers (catches / you) drawn crisp above the effect.
+ * Continuous slippy-map renderer: a real OSM tile pyramid drawn under a live GPU pan/zoom
+ * transform, with deeper tiles streaming in seamlessly as you zoom. Tiles are drawn at full
+ * resolution (no pixel shader / no cell grid) so streets stay sharp and readable, and each
+ * capture is a crisp, labelled pin at its exact lat/lon — clear locations at a glance, like a
+ * lite Google Maps.
  *
- * Requires a runtime shader (API 33+) for the pixel effect — the caller falls back to the coarse
- * grid renderer on older devices.
+ * Requires API 33+ (the caller falls back to the coarse grid renderer on older devices).
  */
 @Composable
 internal fun SlippyPixelMap(
@@ -117,7 +93,7 @@ internal fun SlippyPixelMap(
     val dim = MaterialTheme.colorScheme.onSurfaceVariant
     val geo = remember(points) { points.filter { it.latitude != null && it.longitude != null } }
     val markers = remember(geo) { geo.map { Marker(lonToNx(it.longitude!!), latToNy(it.latitude!!), it) } }
-    val you = current?.takeIf { it.isValid() }?.let { Marker(lonToNx(it.longitude), latToNy(it.latitude), it.let { _ -> geo.firstOrNull() ?: CaptureEntry() }) }
+    val you = current?.takeIf { it.isValid() }?.let { Marker(lonToNx(it.longitude), latToNy(it.latitude), geo.firstOrNull() ?: CaptureEntry()) }
 
     if (markers.isEmpty()) {
         Text("  no geolocated captures yet", color = dim, fontSize = 11.sp, fontFamily = TerminalMono, modifier = modifier)
@@ -125,16 +101,16 @@ internal fun SlippyPixelMap(
     }
 
     val density = LocalDensity.current
-    val cellPx = with(density) { 5.dp.toPx() }
+    val textMeasurer = rememberTextMeasurer()
+    val markerR = with(density) { 5.dp.toPx() }       // filled pin radius (screen-space, fixed)
 
     Column(modifier = modifier) {
         BoxWithConstraints(Modifier.fillMaxWidth().aspectRatio(1f)) {
             val wPx = constraints.maxWidth.toFloat()
             val hPx = constraints.maxHeight.toFloat()
 
-            // View state: normalized centre + DISCRETE integer zoom (stepped levels keep the pixels
-            // rock-solid — no shift/pop/shimmer). Pan is continuous; a pinch accumulates until it
-            // crosses a level threshold, then steps zoom by ±1. Init fits all captures.
+            // View state: normalized centre + DISCRETE integer zoom. Pan is continuous; a pinch
+            // accumulates until it crosses a level threshold, then steps zoom by ±1. Init fits all captures.
             var centerX by remember(geo) { mutableStateOf(0.5) }
             var centerY by remember(geo) { mutableStateOf(0.5) }
             var zoom by remember(geo) { mutableStateOf(4f) }        // always an integer value
@@ -187,39 +163,15 @@ internal fun SlippyPixelMap(
                 }
             }
 
-            // Map-anchored pixel grid: cell size scales with zoom (≈cellPx at each tile level,
-            // breathing to ~2× then halving as the next level loads) and `phase` tracks the map, so
-            // pixels move/scale WITH the map instead of the map crawling through a fixed screen grid.
             val pxPerN = 2.0.pow(zoom.toDouble()) * 256.0
-            val iz = floor(zoom.toDouble()).toInt().coerceIn(3, 19)
-            // Two map-anchored grids for the crossfade: coarse A (cellPx→2·cellPx across the level) and
-            // fine B (A/2). blend = frac(zoom) fades A→B so the pixel size never pops at a level edge.
-            val cellA = (cellPx / (2.0.pow(iz.toDouble()) * 256.0) * pxPerN).toFloat().coerceAtLeast(1f)
-            val cellB = (cellA / 2f).coerceAtLeast(1f)
-            val phaseAX = ((wPx / 2 - centerX * pxPerN).mod(cellA.toDouble())).toFloat()
-            val phaseAY = ((hPx / 2 - centerY * pxPerN).mod(cellA.toDouble())).toFloat()
-            val phaseBX = ((wPx / 2 - centerX * pxPerN).mod(cellB.toDouble())).toFloat()
-            val phaseBY = ((hPx / 2 - centerY * pxPerN).mod(cellB.toDouble())).toFloat()
-            val blend = (zoom - iz).toFloat().coerceIn(0f, 1f)
-            val shader = remember {
-                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) RuntimeShader(PIXEL_SHADER) else null
-            }
 
-            // Tile layer — the graphicsLayer (pixel shader) forces its own composited layer; the
-            // uniforms are refreshed each frame so the grid stays locked to the map.
-            Canvas(
-                Modifier.matchParentSize().graphicsLayer {
-                    clip = true
-                    if (shader != null) {
-                        shader.setFloatUniform("cellA", cellA)
-                        shader.setFloatUniform("cellB", cellB)
-                        shader.setFloatUniform("phaseA", phaseAX, phaseAY)
-                        shader.setFloatUniform("phaseB", phaseBX, phaseBY)
-                        shader.setFloatUniform("blend", blend)
-                        renderEffect = RenderEffect.createRuntimeShaderEffect(shader, "content").asComposeRenderEffect()
-                    }
-                }
-            ) {
+            // Project a normalized (nx, ny) point to its current screen position.
+            fun project(nx: Double, ny: Double) =
+                Offset(wPx / 2 + (nx - centerX) * pxPerN, hPx / 2 + (ny - centerY) * pxPerN)
+
+            // Tile layer — full-resolution, no pixel effect. FilterQuality.High keeps underlay
+            // tiles smooth while finer levels stream in.
+            Canvas(Modifier.matchParentSize()) {
                 drawRect(Color(0xFF02060A))
                 if (!inited) return@Canvas
                 // Tiles: coarsest first so finer levels land on top (seamless multi-level look).
@@ -237,28 +189,24 @@ internal fun SlippyPixelMap(
                         srcSize = IntSize(bmp.width, bmp.height),
                         dstOffset = IntOffset(sx.roundToInt(), sy.roundToInt()),
                         dstSize = IntSize(d, d),
-                        filterQuality = FilterQuality.Low,
+                        filterQuality = FilterQuality.High,
                     )
                 }
             }
 
-            // Markers + gestures on top — snapped to the SAME map-anchored grid as the shader.
+            // Markers + gestures on top — crisp pins at exact projected positions.
             Canvas(
                 Modifier.matchParentSize()
                     .pointerInput(geo) {
                         detectTransformGestures { centroid, pan, gz, _ ->
                             val ppn = 2.0.pow(zoom.toDouble()) * 256.0
-                            // Pan is continuous.
                             var cx = centerX - pan.x / ppn
                             var cy = centerY - pan.y / ppn
-                            // Accumulate the pinch; step integer zoom levels when it crosses ~1.5×/0.67×
-                            // (each step consumes a 2× factor). Keeps zoom on exact levels → stable pixels.
                             pinchAccum *= gz
                             var nz = zoom
                             while (pinchAccum >= 1.5f && nz < 19f) { nz += 1f; pinchAccum /= 2f }
                             while (pinchAccum <= 0.6667f && nz > 3f) { nz -= 1f; pinchAccum *= 2f }
                             if (nz != zoom) {
-                                // Keep the point under the pinch focal point fixed across the level step.
                                 val nUx = cx + (centroid.x - wPx / 2) / ppn
                                 val nUy = cy + (centroid.y - hPx / 2) / ppn
                                 val ppn2 = 2.0.pow(nz.toDouble()) * 256.0
@@ -274,19 +222,13 @@ internal fun SlippyPixelMap(
                         detectTapGestures(
                             onDoubleTap = { centerX = initCx; centerY = initCy; zoom = initZoom },
                             onTap = { pos ->
-                                // Recompute the grid from CURRENT state (this lambda outlives the
-                                // composition it was set up in), then return every catch clustered in
-                                // the tapped cell (± one cell of slop for easy tapping).
+                                // Return every capture whose pin sits within a generous tap radius.
                                 val ppn = 2.0.pow(zoom.toDouble()) * 256.0
-                                val izl = floor(zoom.toDouble()).toInt().coerceIn(3, 19)
-                                val cS = (cellPx / (2.0.pow(izl.toDouble()) * 256.0) * ppn).toFloat().coerceAtLeast(1f)
-                                val phX = ((wPx / 2 - centerX * ppn).mod(cS.toDouble())).toFloat()
-                                val phY = ((hPx / 2 - centerY * ppn).mod(cS.toDouble())).toFloat()
-                                val tcx = floor((pos.x - phX) / cS).toInt(); val tcy = floor((pos.y - phY) / cS).toInt()
+                                val thr = markerR * 3f
                                 val hit = markers.filter {
-                                    val scx = wPx / 2 + (it.nx - centerX) * ppn
-                                    val scy = hPx / 2 + (it.ny - centerY) * ppn
-                                    abs(floor((scx - phX) / cS).toInt() - tcx) <= 1 && abs(floor((scy - phY) / cS).toInt() - tcy) <= 1
+                                    val sx = wPx / 2 + (it.nx - centerX) * ppn
+                                    val sy = hPx / 2 + (it.ny - centerY) * ppn
+                                    hypot(sx - pos.x, sy - pos.y) < thr
                                 }.map { it.cap }
                                 if (hit.isNotEmpty()) onCatch(hit)
                             },
@@ -294,59 +236,76 @@ internal fun SlippyPixelMap(
                     }
             ) {
                 if (!inited) return@Canvas
-                fun cellXY(m: Marker): Pair<Int, Int> {
-                    val scx = wPx / 2 + (m.nx - centerX) * pxPerN
-                    val scy = hPx / 2 + (m.ny - centerY) * pxPerN
-                    return floor((scx - phaseAX) / cellA).toInt() to floor((scy - phaseAY) / cellA).toInt()
-                }
-                // Group markers by map-anchored cell, preserving all CaptureEntry data so we
-                // can color-code by status: cracked > crackable > partial > other.
-                val cellCaptures = HashMap<Long, MutableList<CaptureEntry>>()
-                markers.forEach {
-                    val (cx, cy) = cellXY(it)
-                    val k = (cx.toLong() shl 32) or (cy.toLong() and 0xFFFFFFFFL)
-                    cellCaptures.getOrPut(k) { mutableListOf() }.add(it.cap)
-                }
-                cellCaptures.forEach { (k, caps) ->
-                    val cx = (k shr 32).toInt(); val cy = k.toInt()
-                    val gx = cx * cellA + phaseAX; val gy = cy * cellA + phaseAY
-                    if (gx < -cellA || gy < -cellA || gx > wPx || gy > hPx) return@forEach
-                    val cnt = caps.size
-                    val center = Offset(gx + cellA / 2, gy + cellA / 2)
-                    // Status priority: cracked (bright green) > crackable (lime) > partial (orange) > dim green.
-                    val dotColor = when {
-                        caps.any { it.isCracked }    -> Color(0x3D, 0xFF, 0x6E)
-                        caps.any { it.isCrackable }  -> Color(0xBB, 0xFF, 0x44)
-                        caps.any { it.isPartial }    -> Color(0xFF, 0xA5, 0x33)
-                        else                         -> Color(0x26, 0xAA, 0x55)
+
+                // Draw a small dark rounded badge + monospace label centred above a screen point.
+                fun DrawScope.label(text: String, x: Float, topY: Float, tint: Color) {
+                    val layout = textMeasurer.measure(
+                        text,
+                        TextStyle(color = Color.White, fontSize = 9.sp, fontFamily = TerminalMono),
+                    )
+                    val w = layout.size.width.toFloat()
+                    val h = layout.size.height.toFloat()
+                    val pad = 4f
+                    val cx = x.coerceIn(w / 2 + pad, wPx - w / 2 - pad)
+                    val badgeTop = (topY - h - pad * 2).coerceAtLeast(0f)
+                    drawRoundRect(
+                        Color(0xCC000000),
+                        topLeft = Offset(cx - w / 2 - pad, badgeTop),
+                        size = Size(w + pad * 2, h + pad * 2),
+                        cornerRadius = CornerRadius(4f, 4f),
+                    )
+                    drawText(layout, topLeft = Offset(cx - w / 2, badgeTop + pad))
+                    if (tint != Color.Unspecified) {
+                        drawRect(tint, topLeft = Offset(cx - w / 2 - pad, badgeTop + h + pad * 2), size = Size(w + pad * 2, 2f))
                     }
-                    val r = cellA * (if (cnt > 1) 0.85f else 0.60f)
-                    // Outer glow ring — signals there's something to tap.
-                    drawCircle(dotColor.copy(alpha = 0.30f), radius = r + cellA * 0.5f, center = center)
-                    // Filled circle.
-                    drawCircle(dotColor, radius = r, center = center)
-                    // Inner ring border for crispness against the dark tile background.
-                    drawCircle(Color.Black.copy(alpha = 0.45f), radius = r, center = center, style = Stroke(width = 1.2f))
-                    // White centre dot on clusters — indicates more than one catch here.
-                    if (cnt > 1) drawCircle(Color.White.copy(alpha = 0.85f), radius = r * 0.28f, center = center)
                 }
-                // You: GPS crosshair — outer translucent ring + bright centre dot (distinct from catches).
+
+                // Screen positions for every capture pin.
+                val positions = markers.map { m -> m to project(m.nx, m.ny) }
+                // Greedy cluster: pins that overlap on screen share one marker (with a count badge).
+                val clusters = ArrayList<Pair<Offset, MutableList<CaptureEntry>>>()
+                for ((m, p) in positions) {
+                    var placed = false
+                    for (c in clusters) {
+                        if (hypot(c.first.x - p.x, c.first.y - p.y) < markerR * 2.4f) {
+                            c.second.add(m.cap); placed = true; break
+                        }
+                    }
+                    if (!placed) clusters.add(p to mutableListOf(m.cap))
+                }
+
+                clusters.forEach { (p, caps) ->
+                    if (p.x < -markerR * 2 || p.y < -markerR * 2 || p.x > wPx + markerR * 2 || p.y > hPx + markerR * 2) return@forEach
+                    val color = statusColor(caps)
+                    val cnt = caps.size
+                    // Soft glow so the pin reads against any tile.
+                    drawCircle(color.copy(alpha = 0.22f), radius = markerR * 2.4f, center = p)
+                    // Filled pin + crisp white ring.
+                    drawCircle(color, radius = markerR, center = p)
+                    drawCircle(Color.White, radius = markerR, center = p, style = Stroke(width = 1.6f))
+                    // White centre dot on clusters — indicates more than one catch here.
+                    if (cnt > 1) drawCircle(Color.White.copy(alpha = 0.9f), radius = markerR * 0.42f, center = p)
+                    // SSID label (or a count for clusters) above the pin.
+                    val labelText = if (cnt == 1) caps.first().ssid.let { if (it.length > 18) it.take(17) + "…" else it } else "$cnt captures"
+                    label(labelText, p.x, p.y - markerR * 2.2f, color)
+                }
+
+                // You: GPS crosshair — white ring + bright centre dot (distinct from catches).
                 you?.let { m ->
-                    val (cx, cy) = cellXY(m)
-                    val gx = cx * cellA + phaseAX; val gy = cy * cellA + phaseAY
-                    if (gx >= -cellA && gy >= -cellA && gx <= wPx && gy <= hPx) {
-                        val center = Offset(gx + cellA / 2, gy + cellA / 2)
-                        drawCircle(Color(0xFF, 0xA5, 0x33, 0x55), radius = cellA * 1.4f, center = center)
-                        drawCircle(Color(0xFF, 0xA5, 0x33), radius = cellA * 0.55f, center = center)
-                        drawCircle(Color(0xFF, 0xA5, 0x33), radius = cellA * 0.55f, center = center, style = Stroke(width = 1.5f))
-                        drawCircle(Color.White, radius = cellA * 0.22f, center = center)
+                    val p = project(m.nx, m.ny)
+                    if (p.x >= -markerR * 2 && p.y >= -markerR * 2 && p.x <= wPx + markerR * 2 && p.y <= hPx + markerR * 2) {
+                        drawCircle(Color(0xFF, 0xA5, 0x33, 0x30), radius = markerR * 2.6f, center = p)
+                        drawCircle(Color(0xFF, 0xA5, 0x33), radius = markerR * 0.75f, center = p)
+                        drawCircle(Color.White, radius = markerR * 0.75f, center = p, style = Stroke(width = 1.6f))
+                        drawCircle(Color.White, radius = markerR * 0.30f, center = p)
+                        label("you", p.x, p.y - markerR * 1.9f, Color(0xFF, 0xA5, 0x33))
                     }
                 }
             }
         }
         Spacer(Modifier.height(2.dp))
         Text(
-            "pinch to zoom levels · drag to pan · tap a catch · double-tap to reset",
+            "drag to pan · pinch to zoom · tap a capture · double-tap to reset",
             color = dim.copy(alpha = 0.6f), fontSize = 9.sp, fontFamily = TerminalMono,
         )
     }
