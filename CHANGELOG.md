@@ -4,6 +4,21 @@ All significant changes to PwnCompanion, most recent first.
 
 ---
 
+## v1.2.6 (build 12) — 2026-08-28
+
+App `1.2.6` (build 12) · plugin `2.1.0`
+
+### Map — clear, readable capture locations
+| Area | Detail |
+|------|--------|
+| Full-resolution tiles | Removed the phosphor-pixel shader and cell-grid snap; basemap tiles now draw at native resolution so streets are sharp and legible |
+| Labelled pins | Each capture renders as a crisp pin at its exact lat/lon with a status-colored dot, white ring, and SSID label badge |
+| Street labels | Switched Carto tiles `dark_nolabels` → `dark_all` so road/place names show on the dark basemap |
+| Tap by proximity | Tapping a capture now hits by pin distance instead of a coarse grid cell |
+| Cluster badges | Overlapping captures collapse into a single pin with a "N captures" label |
+
+---
+
 ## v1.2.5 (build 11) — 2026-08-23
 
 App `1.2.5` (build 11) · plugin `2.1.0`
