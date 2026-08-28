@@ -434,7 +434,7 @@ SO_BINDTODEVICE = 25  # Linux-specific socket option
 
 class PwnCompanion(Plugin):
     __author__ = "wsvdmeer"
-    __version__ = "2.1.0"
+    __version__ = "2.2.0"
     __description__ = "Device-side bridge to the PwnCompanion app: screen mirror, GPS, telemetry, captures, commands, and AI voice."
 
     csrf_exempt = True
@@ -508,6 +508,13 @@ class PwnCompanion(Plugin):
         self._voice_pool_ts = 0.0        # wall-clock of the last pool push
         self._wrapped_voice_id = None    # id() of the Voice object we've patched
 
+        # Direct wpa-sec upload backstop: the stock plugin can miss .pcapng captures and
+        # partial grabs that later upgrade, so we upload crackable captures ourselves.
+        # State is a persisted basename -> mtime map so restarts don't re-upload.
+        self._wpa_sec_upload_enabled = True
+        self._wpa_sec_uploaded = {}
+        self._wpa_sec_uploaded_loaded = False
+
         # Operating mode — "AUTO" (scanning) or "MANUAL" (user-controlled, no scanning)
         self._current_mode = "AUTO"
         # Last mode value actually pushed to the app, so on_ui_update can push a
@@ -576,6 +583,13 @@ class PwnCompanion(Plugin):
             self.push_image_interval = self.options["push_image_interval"]
         if "request_gps_interval" in self.options:
             self.request_gps_interval = self.options["request_gps_interval"]
+
+        # Direct wpa-sec upload (backstop to the stock plugin). Optional overrides:
+        #   wpa_sec_upload = false   → disable our upload entirely (stock plugin only)
+        #   wpa_sec_key    = "..."   → explicit key; otherwise the stock wpa-sec plugin's
+        #                              config key/api_key is used. Never hardcoded.
+        if "wpa_sec_upload" in self.options:
+            self._wpa_sec_upload_enabled = bool(self.options["wpa_sec_upload"])
 
         if websockets is None:
             log.error("[pwn-companion] websockets library not installed, aborting")
@@ -927,6 +941,10 @@ class PwnCompanion(Plugin):
                 q = self._classify_pcap(filename, use_cache=False)
                 if q:
                     entry["quality"] = q
+                    # Direct wpa-sec backstop: push crackable grabs ourselves (the stock
+                    # plugin misses .pcapng and partials that upgrade after it uploaded).
+                    if q in ("eapol", "pmkid"):
+                        self._schedule_on_loop(self._upload_capture_async(filename, q), self.loop)
                 h = self._read_hash(filename)
                 if h:
                     entry["hash22000"] = h
@@ -1908,6 +1926,9 @@ class PwnCompanion(Plugin):
                 cycles += 1
                 if cycles % 10 == 0:
                     await self._send_cracked()
+                    # Re-sweep captures for partial -> full-EAPOL upgrades and upload
+                    # them to wpa-sec (blocking scan runs off the event loop).
+                    await asyncio.get_event_loop().run_in_executor(None, self._sweep_wpa_sec_uploads)
                 # Re-check whether the wpa-sec service is reachable (~every 5 min); on a
                 # change, push a status so the app's "cracking" row reflects on/offline.
                 if cycles % 25 == 0:
@@ -2561,6 +2582,105 @@ class PwnCompanion(Plugin):
             return True
         except Exception:
             return False
+
+    # ── Direct wpa-sec upload (backstop to the stock plugin) ────────────────────
+    def _wpa_sec_key(self):
+        """wpa-sec API key for uploads — from the pwn-companion option, else the stock
+        wpa-sec plugin's config (key or api_key). Never hardcoded in source."""
+        opt = self.options.get("wpa_sec_key")
+        if opt:
+            return str(opt)
+        try:
+            import pwnagotchi
+            ws = (pwnagotchi.config or {}).get("main", {}).get("plugins", {}).get("wpa-sec", {})
+            return ws.get("key") or ws.get("api_key")
+        except Exception:
+            return None
+
+    def _wpa_sec_uploaded_path(self):
+        return os.path.join(self.handshakes_dir, ".pwncompanion_wpa_sec_uploaded.json")
+
+    def _load_wpa_sec_uploaded(self):
+        if self._wpa_sec_uploaded_loaded:
+            return
+        self._wpa_sec_uploaded_loaded = True
+        try:
+            with open(self._wpa_sec_uploaded_path()) as fp:
+                self._wpa_sec_uploaded = json.load(fp) or {}
+        except Exception:
+            self._wpa_sec_uploaded = {}
+
+    def _save_wpa_sec_uploaded(self):
+        try:
+            with open(self._wpa_sec_uploaded_path(), "w") as fp:
+                json.dump(self._wpa_sec_uploaded, fp)
+        except OSError as e:
+            log.debug(f"[pwn-companion] couldn't save wpa-sec upload state: {e}")
+
+    def _upload_to_wpa_sec(self, path):
+        """POST one capture to wpa-sec; returns the service's response text, or None on
+        error. Blocking — call via run_in_executor."""
+        key = self._wpa_sec_key()
+        if not key:
+            return "SKIP:nokey"
+        url = self._wpa_sec_api_url().rstrip("/") + "/?api&submit"
+        try:
+            with open(path, "rb") as fh:
+                r = requests.post(url, files={"file": fh}, data={"key": key}, timeout=30)
+            return (r.text or "").strip()
+        except Exception as e:
+            log.warning(f"[pwn-companion] wpa-sec upload failed for {os.path.basename(path)}: {e}")
+            return None
+
+    def _maybe_upload_to_wpa_sec(self, path, quality):
+        """Upload a capture once it's crackable, and again if it later grows (bettercap
+        appends frames so a partial can become a full EAPOL). Never uploads partials.
+        Dedupes via a persisted basename->mtime map so a restart doesn't re-upload."""
+        if not self._wpa_sec_upload_enabled or quality not in ("eapol", "pmkid"):
+            return
+        self._load_wpa_sec_uploaded()
+        try:
+            mtime = os.path.getmtime(path)
+        except OSError:
+            return
+        base = capture_base(os.path.basename(path))
+        if self._wpa_sec_uploaded.get(base) == mtime:
+            return
+        result = self._upload_to_wpa_sec(path)
+        if result is None or result.startswith("SKIP:"):
+            return
+        if result.startswith("ERROR"):
+            # Bad key / server-side rejection — don't record, so a corrected key retries
+            # on the next sweep instead of silently never uploading this file again.
+            log.warning(f"[pwn-companion] wpa-sec upload {base}: {result}")
+            return
+        log.info(f"[pwn-companion] wpa-sec upload {base}: {result}")
+        self._wpa_sec_uploaded[base] = mtime
+        self._save_wpa_sec_uploaded()
+
+    def _sweep_wpa_sec_uploads(self):
+        """Re-classify every capture and upload the crackable ones. Catches files that
+        upgraded partial -> full EAPOL after their on_handshake event already fired."""
+        try:
+            directory = self.handshakes_dir
+            if not directory or not os.path.isdir(directory):
+                return
+            for name in os.listdir(directory):
+                if not is_capture_file(name):
+                    continue
+                path = os.path.join(directory, name)
+                q = self._classify_pcap(path)   # cached; re-runs if the file grew
+                if q:
+                    self._maybe_upload_to_wpa_sec(path, q)
+        except Exception as e:
+            log.debug(f"[pwn-companion] wpa-sec upload sweep failed: {e}")
+
+    async def _upload_capture_async(self, path, quality):
+        """Schedule a blocking upload off the main loop (on_handshake is a hot path)."""
+        try:
+            await asyncio.get_event_loop().run_in_executor(None, self._maybe_upload_to_wpa_sec, path, quality)
+        except Exception:
+            pass
 
     async def _send_status_message(self, message: str):
         """Send status message to app (on connection or important events)"""

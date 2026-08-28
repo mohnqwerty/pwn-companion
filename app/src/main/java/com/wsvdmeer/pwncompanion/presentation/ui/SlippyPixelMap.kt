@@ -21,20 +21,16 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ColorFilter
+import androidx.compose.ui.graphics.ColorMatrix
 import androidx.compose.ui.graphics.FilterQuality
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
-import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.drawText
-import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
@@ -74,11 +70,23 @@ private fun statusColor(caps: List<CaptureEntry>): Color = when {
 }
 
 /**
+ * Night-mode recolor for the keyless OSM (light) tiles: darkens the beige land + dims the dark
+ * street labels toward black while keeping roads faintly lighter, with a phosphor-green tint so
+ * the bright capture pins pop against it. (A linear darken keeps the road/background ordering
+ * intact — unlike an invert, which would blow the labels out to bright.)
+ */
+private val NIGHT_MODE = ColorMatrix(floatArrayOf(
+    0.22f, 0.04f, 0.02f, 0f, 6f,    // R
+    0.03f, 0.30f, 0.05f, 0f, 9f,    // G
+    0.03f, 0.05f, 0.28f, 0f, 11f,   // B
+    0f, 0f, 0f, 1f, 0f,
+))
+
+/**
  * Continuous slippy-map renderer: a real OSM tile pyramid drawn under a live GPU pan/zoom
- * transform, with deeper tiles streaming in seamlessly as you zoom. Tiles are drawn at full
- * resolution (no pixel shader / no cell grid) so streets stay sharp and readable, and each
- * capture is a crisp, labelled pin at its exact lat/lon — clear locations at a glance, like a
- * lite Google Maps.
+ * transform, with deeper tiles streaming in seamlessly as you zoom. Tiles are recolored to a dark
+ * night mode (keyless OSM source, street labels dimmed) and each capture is a crisp, label-free
+ * status-colored pin at its exact lat/lon — clear locations at a glance.
  *
  * Requires API 33+ (the caller falls back to the coarse grid renderer on older devices).
  */
@@ -101,7 +109,6 @@ internal fun SlippyPixelMap(
     }
 
     val density = LocalDensity.current
-    val textMeasurer = rememberTextMeasurer()
     val markerR = with(density) { 5.dp.toPx() }       // filled pin radius (screen-space, fixed)
 
     Column(modifier = modifier) {
@@ -192,6 +199,7 @@ internal fun SlippyPixelMap(
                         srcSize = IntSize(bmp.width, bmp.height),
                         dstOffset = IntOffset(sx.roundToInt(), sy.roundToInt()),
                         dstSize = IntSize(d, d),
+                        colorFilter = ColorFilter.colorMatrix(NIGHT_MODE),
                         filterQuality = FilterQuality.High,
                     )
                 }
@@ -240,32 +248,9 @@ internal fun SlippyPixelMap(
             ) {
                 if (!inited) return@Canvas
 
-                // Draw a small dark rounded badge + monospace label centred above a screen point.
-                fun DrawScope.label(text: String, x: Float, topY: Float, tint: Color) {
-                    val layout = textMeasurer.measure(
-                        text,
-                        TextStyle(color = Color.White, fontSize = 9.sp, fontFamily = TerminalMono),
-                    )
-                    val w = layout.size.width.toFloat()
-                    val h = layout.size.height.toFloat()
-                    val pad = 4f
-                    val cx = x.coerceIn(w / 2 + pad, wPx - w / 2 - pad)
-                    val badgeTop = (topY - h - pad * 2).coerceAtLeast(0f)
-                    drawRoundRect(
-                        Color(0xCC000000),
-                        topLeft = Offset(cx - w / 2 - pad, badgeTop),
-                        size = Size(w + pad * 2, h + pad * 2),
-                        cornerRadius = CornerRadius(4f, 4f),
-                    )
-                    drawText(layout, topLeft = Offset(cx - w / 2, badgeTop + pad))
-                    if (tint != Color.Unspecified) {
-                        drawRect(tint, topLeft = Offset(cx - w / 2 - pad, badgeTop + h + pad * 2), size = Size(w + pad * 2, 2f))
-                    }
-                }
-
                 // Screen positions for every capture pin.
                 val positions = markers.map { m -> m to project(m.nx, m.ny) }
-                // Greedy cluster: pins that overlap on screen share one marker (with a count badge).
+                // Greedy cluster: pins that overlap on screen share one marker (with a count dot).
                 val clusters = ArrayList<Pair<Offset, MutableList<CaptureEntry>>>()
                 for ((m, p) in positions) {
                     var placed = false
@@ -288,9 +273,6 @@ internal fun SlippyPixelMap(
                     drawCircle(Color.White, radius = markerR, center = p, style = Stroke(width = 1.6f))
                     // White centre dot on clusters — indicates more than one catch here.
                     if (cnt > 1) drawCircle(Color.White.copy(alpha = 0.9f), radius = markerR * 0.42f, center = p)
-                    // SSID label (or a count for clusters) above the pin.
-                    val labelText = if (cnt == 1) caps.first().ssid.let { if (it.length > 18) it.take(17) + "…" else it } else "$cnt captures"
-                    label(labelText, p.x, p.y - markerR * 2.2f, color)
                 }
 
                 // You: GPS crosshair — white ring + bright centre dot (distinct from catches).
@@ -301,14 +283,13 @@ internal fun SlippyPixelMap(
                         drawCircle(Color(0xFF, 0xA5, 0x33), radius = markerR * 0.75f, center = p)
                         drawCircle(Color.White, radius = markerR * 0.75f, center = p, style = Stroke(width = 1.6f))
                         drawCircle(Color.White, radius = markerR * 0.30f, center = p)
-                        label("you", p.x, p.y - markerR * 1.9f, Color(0xFF, 0xA5, 0x33))
                     }
                 }
             }
         }
         Spacer(Modifier.height(2.dp))
         Text(
-            "drag to pan · pinch to zoom · tap a capture · double-tap to reset",
+            "drag to pan · pinch to zoom · tap a capture · double-tap to reset · © OpenStreetMap",
             color = dim.copy(alpha = 0.6f), fontSize = 9.sp, fontFamily = TerminalMono,
         )
     }

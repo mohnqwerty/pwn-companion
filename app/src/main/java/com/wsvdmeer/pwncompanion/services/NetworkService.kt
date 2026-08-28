@@ -10,6 +10,7 @@ import com.wsvdmeer.pwncompanion.models.DeviceState
 import com.wsvdmeer.pwncompanion.models.ScreenData
 import com.wsvdmeer.pwncompanion.protocol.MessageHandler
 import com.wsvdmeer.pwncompanion.protocol.OutgoingMessageQueue
+import com.wsvdmeer.pwncompanion.utils.DiagnosticsLog
 import com.wsvdmeer.pwncompanion.utils.NotificationHelper
 import com.wsvdmeer.pwncompanion.workers.WorkScheduler
 import kotlinx.coroutines.CoroutineScope
@@ -207,12 +208,14 @@ class NetworkService(private val context: Context) {
         
         if (detected) {
             Log.i(tag, "✅ BNEP0 detected (state was stable for ${timeSinceLastChange}ms) - starting services")
+            DiagnosticsLog.log("NetworkService", "BNEP0 tether detected — starting services")
             
             // Check if IP address changed on reconnect
             val currentIp = bluetoothMonitor.getBnep0InterfaceIp()
             if (currentIp != null && currentIp != lastBnep0Ip) {
                 if (lastBnep0Ip != null) {
                     Log.i(tag, "🔄 BNEP0 IP changed: $lastBnep0Ip → $currentIp")
+                    DiagnosticsLog.log("NetworkService", "BNEP0 IP changed: $lastBnep0Ip → $currentIp (forcing restart)")
                     Log.i(tag, "   Force stopping old server to clean up port bindings...")
                     stop()
                     // Wait for port to be released from TIME_WAIT state
@@ -226,6 +229,7 @@ class NetworkService(private val context: Context) {
             start()
         } else {
             Log.i(tag, "❌ BNEP0 disconnected (state was stable for ${timeSinceLastChange}ms) - stopping services")
+            DiagnosticsLog.log("NetworkService", "BNEP0 tether disconnected — stopping services")
             lastBnep0Ip = null
             stop()
         }
@@ -238,6 +242,8 @@ class NetworkService(private val context: Context) {
      */
     fun initialize() {
         Log.i(tag, "Initializing NetworkService")
+        DiagnosticsLog.init(context)
+        DiagnosticsLog.log("NetworkService", "initialize — networking armed, monitoring bnep0")
         // Networking is desired by default from launch, so the health check is a
         // reliable backstop: if bnep is already up when the app starts (app launched
         // AFTER the Pwnagotchi), there's no down→up transition for the monitor to
@@ -352,6 +358,7 @@ class NetworkService(private val context: Context) {
 
                 if (bnep0Ip == null) {
                     Log.e(tag, "✗ Failed to get bnep0 interface IP after $maxAttempts attempts — DHCP never completed?")
+                    DiagnosticsLog.log("NetworkService", "start failed — no bnep0 IP after $maxAttempts attempts (DHCP?)")
                     _isServerRunning.value = false
                     serverStarted = false
                     return@launch
@@ -367,11 +374,13 @@ class NetworkService(private val context: Context) {
                 val serverUp = webSocketServer.start(bnep0Ip)
                 if (!serverUp) {
                     Log.e(tag, "✗ WebSocket server failed to bind on $bnep0Ip:8081 — NOT announcing a dead port")
+                    DiagnosticsLog.log("NetworkService", "WebSocket server FAILED to bind on $bnep0Ip:8081")
                     _isServerRunning.value = false
                     serverStarted = false
                     return@launch
                 }
                 Log.i(tag, "✓ WebSocket server bound on ws://$bnep0Ip:8081")
+                DiagnosticsLog.log("NetworkService", "WebSocket server bound on ws://$bnep0Ip:8081")
 
                 // Update notification with live IP (still 0 devices at this point)
                 NotificationHelper.updateNetworkNotification(context, ip = bnep0Ip, deviceCount = 0)
@@ -510,6 +519,7 @@ class NetworkService(private val context: Context) {
             }
 
             Log.i(tag, "Device connected: $deviceName (Client IP: $clientIp)")
+            DiagnosticsLog.log("NetworkService", "client connected: $deviceName (ip=$clientIp)")
         }
     }
 
@@ -555,6 +565,7 @@ class NetworkService(private val context: Context) {
             }
 
             Log.i(tag, "Device disconnected: $deviceId")
+            DiagnosticsLog.log("NetworkService", "client disconnected: $deviceId (remaining=${webSocketServer.getConnectedClientCount()})")
         }
     }
 
