@@ -128,6 +128,13 @@ class MessageHandler {
             handleGpsRequestMessage(deviceId, message)
         }
 
+        // COMMAND_RECEIVED handler — the plugin acks every command with this type.
+        // Unregistered, each ack hit the "No handler registered" WARN path (the log
+        // showed clusters of six within 400 ms); it's a bare ack, so DEBUG only.
+        messageProcessor.registerHandler("command_received") { deviceId, message ->
+            Log.d(tag, "Command ack from $deviceId: action=${message.message ?: "?"}")
+        }
+
         // STATUS handler
         messageProcessor.registerHandler(ScreenData.TYPE_STATUS) { deviceId, message ->
             handleStatusMessage(deviceId, message)
@@ -238,7 +245,9 @@ class MessageHandler {
      * This handler just logs the receipt so message stats remain accurate.
      */
     private fun handleGpsRequestMessage(deviceId: String, @Suppress("UNUSED") message: ScreenData) {
-        Log.i(tag, "GPS request received from device: $deviceId (response handled by NetworkService)")
+        // DEBUG: the plugin polls every few seconds — INFO was ~12 lines/min of
+        // identical messages in the 5-day log capture.
+        Log.d(tag, "GPS request received from device: $deviceId (response handled by NetworkService)")
     }
 
     /**

@@ -20,6 +20,9 @@ local.properties
 __pycache__/
 /redact.py
 
+# graphify's local knowledge-graph output (scratch, machine-specific, regeneratable)
+/graphify-out/
+
 # Large model assets are downloaded at runtime, not committed
 /app/src/main/assets/models/*.gguf
 .ghtoken

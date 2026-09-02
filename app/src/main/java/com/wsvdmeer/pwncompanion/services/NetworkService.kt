@@ -23,6 +23,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 
 /**
@@ -139,6 +140,22 @@ class NetworkService(private val context: Context) {
     @Suppress("UNUSED")
     val deviceStates: StateFlow<Map<String, DeviceState>> = _deviceStates.asStateFlow()
 
+    /**
+     * States of recently-disconnected devices, keyed by STABLE identity (the resolved
+     * pwnagotchi name) with disconnect timestamps. WebSocket sessions are keyed by a
+     * random UUID per connection, so before this existed every reconnect created a
+     * brand-new device and wiped its captures/telemetry/wpa-sec state — a 5-day log
+     * showed 17 connections producing 17 unique device identities with a median
+     * session of ~93 s. When a new session's first message resolves a matching name,
+     * the retained state seeds the fresh one, so the device's data survives
+     * reconnects. Entries expire after [retainedStateTtlMs] and the map is
+     * size-bounded, so ghost devices can't accumulate.
+     */
+    private val lastKnownStates =
+        java.util.concurrent.ConcurrentHashMap<String, Pair<DeviceState, Long>>()
+    private val retainedStateTtlMs = 24 * 60 * 60 * 1000L
+    private val retainedStateMax = 8
+
     private val _isServerRunning = MutableStateFlow(false)
     @Suppress("UNUSED")
     val isServerRunning: StateFlow<Boolean> = _isServerRunning.asStateFlow()
@@ -153,7 +170,10 @@ class NetworkService(private val context: Context) {
     private val crackedNotified = java.util.Collections.synchronizedSet(HashSet<String>())
     @Volatile private var crackedBaselined = false
 
-    private var serverStarted = false
+    // Atomic so the concurrent start() triggers (BT monitor callback, 5 s health
+    // check, requestStart, CompanionBackgroundService) can't race into two parallel
+    // binds — the log showed "WebSocket server bound" firing twice ~5 s apart.
+    private val serverStarted = AtomicBoolean(false)
     // "User wants networking on" — distinct from serverStarted (which is false after
     // a failed bind). The health check uses this to recover even when bnep is
     // already up so there's no down→up transition to re-trigger start().
@@ -183,14 +203,14 @@ class NetworkService(private val context: Context) {
         // Exception: if service isn't running and BT is detected, always allow a retry
         // (covers the case where start() failed due to DHCP not being ready yet)
         if (lastBnep0State == detected) {
-            if (detected && !serverStarted) {
+            if (detected && !serverStarted.get()) {
                 Log.d(tag, "♻️ Allowing retry: BT still detected but service not running (previous start may have failed)")
             } else {
                 Log.d(tag, "⏭️ Ignoring duplicate BNEP0 state change: $detected (already in this state)")
                 return
             }
         }
-        
+
         // Check if we're throttled (too soon after last change)
         if (timeSinceLastChange < stateChangeThrottleMs) {
             Log.w(tag, "⏱️ BNEP0 state change throttled: only ${timeSinceLastChange}ms since last change")
@@ -199,6 +219,16 @@ class NetworkService(private val context: Context) {
             // Without this, a throttled disconnect keeps lastBnep0State=true, causing the
             // subsequent reconnect to be silently ignored as a "duplicate".
             lastBnep0State = null
+            // Don't just drop the event on the floor and wait for the next poll: a
+            // throttled RECONNECT used to sit unprocessed until the poller's next
+            // callback (seconds of dead air after a BT blip). Re-schedule it just past
+            // the throttle window; the duplicate guard makes extra retries no-ops.
+            val retryInMs = stateChangeThrottleMs - timeSinceLastChange + 250
+            Log.i(tag, "   Scheduling state-change retry in ${retryInMs}ms")
+            scope.launch {
+                delay(retryInMs)
+                handleBluetoothStateChange(detected)
+            }
             return
         }
         
@@ -272,7 +302,7 @@ class NetworkService(private val context: Context) {
                     val bnepUp = bluetoothMonitor.getBnep0InterfaceIp() != null
                     if (bnepUp && !webSocketServer.isRunning()) {
                         Log.w(tag, "🩺 Health check: bnep up but server not listening — forcing rebind")
-                        serverStarted = false
+                        serverStarted.set(false)
                         lastBnep0State = null
                         lastBnep0Ip = null
                         start()
@@ -305,7 +335,7 @@ class NetworkService(private val context: Context) {
     fun requestStart() {
         networkingDesired = true
         scope.launch {
-            if (!serverStarted && bluetoothMonitor.getBnep0InterfaceIp() != null) {
+            if (!serverStarted.get() && bluetoothMonitor.getBnep0InterfaceIp() != null) {
                 Log.i(tag, "requestStart: bnep already up — starting now")
                 start()
             } else {
@@ -321,12 +351,13 @@ class NetworkService(private val context: Context) {
      * (fixes issue where app restart doesn't announce to pwnagotchi)
      */
     fun start() {
-        if (serverStarted) {
+        // compareAndSet makes concurrent start() triggers idempotent: the first one
+        // wins, the rest log and return instead of racing two parallel server binds.
+        if (!serverStarted.compareAndSet(false, true)) {
             Log.w(tag, "Server already started")
             return
         }
 
-        serverStarted = true
         networkingDesired = true
         _isServerRunning.value = true
         Log.i(tag, "═══════════════════════════════════════════")
@@ -360,7 +391,7 @@ class NetworkService(private val context: Context) {
                     Log.e(tag, "✗ Failed to get bnep0 interface IP after $maxAttempts attempts — DHCP never completed?")
                     DiagnosticsLog.log("NetworkService", "start failed — no bnep0 IP after $maxAttempts attempts (DHCP?)")
                     _isServerRunning.value = false
-                    serverStarted = false
+                    serverStarted.set(false)
                     return@launch
                 }
                 
@@ -376,9 +407,21 @@ class NetworkService(private val context: Context) {
                     Log.e(tag, "✗ WebSocket server failed to bind on $bnep0Ip:8081 — NOT announcing a dead port")
                     DiagnosticsLog.log("NetworkService", "WebSocket server FAILED to bind on $bnep0Ip:8081")
                     _isServerRunning.value = false
-                    serverStarted = false
+                    serverStarted.set(false)
                     return@launch
                 }
+
+                // A stop() may have landed while we were in the DHCP retry loop or
+                // binding — it set serverStarted=false and tore down the (old) server.
+                // If so, don't leave a freshly-bound server running against the user's
+                // stop intent: unbind and bail.
+                if (!serverStarted.get() || !networkingDesired) {
+                    Log.i(tag, "⏹ Stop requested during start — unbinding freshly started server")
+                    runCatching { webSocketServer.stop() }
+                    _isServerRunning.value = false
+                    return@launch
+                }
+
                 Log.i(tag, "✓ WebSocket server bound on ws://$bnep0Ip:8081")
                 DiagnosticsLog.log("NetworkService", "WebSocket server bound on ws://$bnep0Ip:8081")
 
@@ -402,7 +445,7 @@ class NetworkService(private val context: Context) {
             } catch (e: Exception) {
                 Log.e(tag, "✗ Error starting services: ${e.message}", e)
                 _isServerRunning.value = false
-                serverStarted = false
+                serverStarted.set(false)
             }
         }
     }
@@ -414,17 +457,25 @@ class NetworkService(private val context: Context) {
      *           but NOT stopped on client connect (allows reconnection)
      */
     fun stop() {
-        if (!serverStarted) {
-            Log.w(tag, "Server not running")
-            return
-        }
+        // getAndSet=false claims the teardown: concurrent stop() calls collapse into
+        // one, and a stop racing a mid-flight start() still flips the flag so the
+        // start coroutine's post-bind re-check unbinds itself.
+        val wasRunning = serverStarted.getAndSet(false)
 
-        serverStarted = false
         networkingDesired = false   // user stopped — don't let the health check rebind
         _isServerRunning.value = false
         // Reset BT state tracking so Bluetooth reconnect can restart the service after a manual stop
         lastBnep0State = null
         lastBnep0Ip = null
+
+        if (!wasRunning) {
+            // Still reset the intent flags above: a stop during the health-check
+            // recovery window used to leave networkingDesired=true, so the app kept
+            // rebinding after the user asked it to stop.
+            Log.w(tag, "Stop requested but server was not running — resetting intent flags")
+            return
+        }
+
         Log.i(tag, "═══════════════════════════════════════════")
         Log.i(tag, "⏹ NETWORK SERVICE STOPPING")
         Log.i(tag, "═══════════════════════════════════════════")
@@ -525,7 +576,13 @@ class NetworkService(private val context: Context) {
 
     private fun onClientDisconnected(deviceId: String) {
         scope.launch {
-            _deviceStates.update { it.toMutableMap().apply { remove(deviceId) } }
+            // Snapshot the device's state BEFORE removing it: keyed by its stable
+            // identity (resolved pwnagotchi name), it seeds the next session so
+            // captures/telemetry/wpa-sec data survive the reconnect churn.
+            _deviceStates.update { states ->
+                states[deviceId]?.let { retainDeviceState(it) }
+                states.toMutableMap().apply { remove(deviceId) }
+            }
             _connectedDeviceCount.value = webSocketServer.getConnectedClientCount()
 
             // Refresh notification with updated device count
@@ -569,6 +626,44 @@ class NetworkService(private val context: Context) {
         }
     }
 
+    /**
+     * Stable identity for retained-state lookup: the device's own resolved name.
+     * Session-scoped placeholders ("Device_<uuid>") are deliberately not retained —
+     * they're useless for matching a future session.
+     */
+    private fun stableDeviceKey(state: DeviceState): String? =
+        state.pwnagotchiName?.trim()?.lowercase()
+            ?.takeIf { it.isNotBlank() && !it.startsWith("device_") }
+
+    /** Retain a disconnected device's state under its stable key (bounded + expiring). */
+    private fun retainDeviceState(state: DeviceState) {
+        val key = stableDeviceKey(state) ?: return
+        lastKnownStates[key] = state to System.currentTimeMillis()
+        val now = System.currentTimeMillis()
+        lastKnownStates.entries.removeIf { now - it.value.second > retainedStateTtlMs }
+        // Hard size bound: drop the oldest entries if ghost devices pile up.
+        while (lastKnownStates.size > retainedStateMax) {
+            val oldest = lastKnownStates.entries.minByOrNull { it.value.second } ?: break
+            lastKnownStates.remove(oldest.key)
+        }
+    }
+
+    /**
+     * Fill a fresh session's state from the retained one: anything the new session
+     * hasn't learned yet (captures, telemetry, wpa-sec flags, file count, e-ink
+     * invert) keeps the retained value; live fields always win.
+     */
+    private fun seedFromRetained(base: DeviceState, retained: DeviceState): DeviceState =
+        base.copy(
+            pwnagotchiName = base.pwnagotchiName ?: retained.pwnagotchiName,
+            captures = if (base.captures.isEmpty()) retained.captures else base.captures,
+            telemetry = base.telemetry ?: retained.telemetry,
+            wpaSecEnabled = base.wpaSecEnabled ?: retained.wpaSecEnabled,
+            wpaSecOnline = base.wpaSecOnline ?: retained.wpaSecOnline,
+            captureFileCount = base.captureFileCount ?: retained.captureFileCount,
+            uiInvert = if (base.uiInvert) base.uiInvert else retained.uiInvert,
+        )
+
     private fun onDataReceived(deviceId: String, data: ScreenData) {
         scope.launch {
             messageHandler.handleIncomingMessage(deviceId, data)
@@ -580,7 +675,9 @@ class NetworkService(private val context: Context) {
                 val cachedGps = lastGpsData
                 if (cachedGps != null) {
                     outgoingMessageQueue.enqueue(deviceId, cachedGps)
-                    Log.i(tag, "📍 GPS request from $deviceId — responded with cached GPS (lat=${cachedGps.latitude}, lon=${cachedGps.longitude})")
+                    // DEBUG: the plugin polls every few seconds — INFO here was ~12
+                    // lines/min of pure noise in the 5-day log capture.
+                    Log.d(tag, "📍 GPS request from $deviceId — responded with cached GPS (lat=${cachedGps.latitude}, lon=${cachedGps.longitude})")
                 } else {
                     Log.d(tag, "📍 GPS request from $deviceId — no cached GPS yet")
                     // Self-heal: GpsService may have failed to start (e.g. blocked while the
@@ -600,11 +697,20 @@ class NetworkService(private val context: Context) {
             // clobber each other's merge (which silently dropped captures/telemetry).
             // The lambda is pure (copy/mergeCaptures have no side effects), so it's safe
             // to re-run on CAS retry.
+            //
+            // Identity persistence: resolve the message's stable device name and pull
+            // back the state retained from a previous session (if any). This runs
+            // outside update{} — it's a lookup+remove, and a CAS retry would otherwise
+            // double-apply it (harmless, but cleaner outside).
+            val restoredState = data.resolvedDeviceName?.trim()?.lowercase()
+                ?.takeIf { it.isNotBlank() && !it.startsWith("device_") }
+                ?.let { lastKnownStates.remove(it) }?.first
+
             _deviceStates.update { states ->
                 // Don't drop data that arrives before onClientConnected has registered the device
                 // (the plugin fires capture_history immediately on connect — it used to race the
                 // async registration and get discarded, so captures only showed after a reconnect).
-                val currentState = states[deviceId] ?: DeviceState(
+                val freshState = states[deviceId] ?: DeviceState(
                     deviceId = deviceId,
                     deviceName = data.deviceName ?: "pwnagotchi",
                     ipAddress = "",
@@ -612,6 +718,7 @@ class NetworkService(private val context: Context) {
                     isConnected = true,
                     connectionState = DeviceState.ConnectionState.CONNECTED,
                 )
+                val currentState = restoredState?.let { seedFromRetained(freshState, it) } ?: freshState
                 val updatedState = currentState.copy(
                     deviceName = data.deviceName ?: currentState.deviceName,
                     // Capture the Pwnagotchi's own name from plugin status messages

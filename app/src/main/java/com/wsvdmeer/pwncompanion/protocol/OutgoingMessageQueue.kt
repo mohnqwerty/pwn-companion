@@ -47,6 +47,13 @@ class OutgoingMessageQueue {
      */
     fun enqueue(deviceId: String, message: ScreenData): Boolean {
         return try {
+            // Coalesce GPS updates per device: the initial connect push plus
+            // reconnect-flushed gps_requests used to pile up several GPS messages in
+            // the queue, and the plugin acked every one of them — 244 duplicate
+            // "gps_received" acks within a 5-day log. Only the newest fix matters.
+            if (message.type == ScreenData.TYPE_GPS) {
+                messageQueue.removeAll { it.deviceId == deviceId && it.message.type == ScreenData.TYPE_GPS }
+            }
             val queuedMsg = QueuedMessage(deviceId, message)
             messageQueue.offer(queuedMsg)
             _queueSize.value = messageQueue.size

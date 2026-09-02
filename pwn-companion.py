@@ -39,6 +39,7 @@ Configuration (config.toml):
     altitude_position = [0, 102]                # Position for altitude display [x, y]
     push_image_interval = 1                     # Push screenshot every N seconds (0 = disabled)
     request_gps_interval = 5                    # Request GPS every N seconds (0 = disabled)
+    capture_history_limit = 300                 # Max captures sent on connect (payload guard)
 
 Mobile App Protocol:
 
@@ -378,6 +379,11 @@ PERIODIC_TASK_RETRY_SLEEP = 1  # seconds
 # app's [ vitals ] gauges stay live even while paused (on_epoch only fires in AUTO).
 VITALS_PUSH_INTERVAL = 12  # seconds
 
+# Full-status refresh cadence. The initial status goes stale within a session:
+# wpa_sec_online is only health-checked on connect and pwnagotchi_mood is null until
+# the first emotion event — the app showed status=null fields for whole sessions.
+STATUS_REFRESH_INTERVAL = 300  # seconds
+
 # How long an app-pushed voice pool stays usable before we fall back to the device's
 # own stock voice. The app re-pushes on every per-category refresh (~90s) while
 # connected, so this only trips well after the app has gone quiet / disconnected.
@@ -434,7 +440,7 @@ SO_BINDTODEVICE = 25  # Linux-specific socket option
 
 class PwnCompanion(Plugin):
     __author__ = "wsvdmeer"
-    __version__ = "2.2.0"
+    __version__ = "2.2.1"
     __description__ = "Device-side bridge to the PwnCompanion app: screen mirror, GPS, telemetry, captures, commands, and AI voice."
 
     csrf_exempt = True
@@ -458,6 +464,8 @@ class PwnCompanion(Plugin):
         self.request_gps_interval = (
             SESSION_REQUEST_GPS_INTERVAL  # Request GPS every N seconds by default
         )
+        # Max captures shipped in the connect-time capture_history payload.
+        self.capture_history_limit = 300
 
         # State
         self.discovering = False
@@ -583,6 +591,8 @@ class PwnCompanion(Plugin):
             self.push_image_interval = self.options["push_image_interval"]
         if "request_gps_interval" in self.options:
             self.request_gps_interval = self.options["request_gps_interval"]
+        if "capture_history_limit" in self.options:
+            self.capture_history_limit = int(self.options["capture_history_limit"])
 
         # Direct wpa-sec upload (backstop to the stock plugin). Optional overrides:
         #   wpa_sec_upload = false   → disable our upload entirely (stock plugin only)
@@ -1128,15 +1138,19 @@ class PwnCompanion(Plugin):
             log.error(f"[pwn-companion] delete_capture failed: {e}")
         return removed
 
-    def _scan_capture_history(self, limit=300):
+    def _scan_capture_history(self, limit=None):
         """Scan the handshakes dir and build a capture log for the app.
 
         Pwnagotchi writes one <SSID>_<BSSID>.pcap per captured handshake; our
         on_handshake() drops a matching <base>.gps.json sidecar with the GPS fix.
         We pair them up so the app can show a map/list of where things were caught.
-        Newest captures first; capped at `limit` to keep the payload small.
+        Newest captures first; capped at `limit` (capture_history_limit option,
+        default 300) to keep the payload small — the log showed the device holding
+        647 files while only 300 were ever shipped, with no way to raise it.
         """
         captures = []
+        if limit is None:
+            limit = self.capture_history_limit
         try:
             directory = self.handshakes_dir
             if not directory or not os.path.isdir(directory):
@@ -1837,6 +1851,11 @@ class PwnCompanion(Plugin):
         self.periodic_tasks.append(task)
         log.debug(f"[pwn-companion]  Periodic vitals push started ({VITALS_PUSH_INTERVAL}s)")
 
+        # Full-status refresh — keeps mood / mode / wpa-sec state from going stale.
+        task = asyncio.create_task(self._periodic_status_refresh())
+        self.periodic_tasks.append(task)
+        log.debug(f"[pwn-companion]  Periodic status refresh started ({STATUS_REFRESH_INTERVAL}s)")
+
     def _stop_periodic_tasks(self):
         """Stop all periodic background tasks"""
         if not self.periodic_tasks:
@@ -1993,6 +2012,37 @@ class PwnCompanion(Plugin):
                 await asyncio.sleep(
                     PERIODIC_TASK_RETRY_SLEEP
                 )  # Brief delay before retry
+
+    async def _periodic_status_refresh(self):
+        """Re-send the full status every STATUS_REFRESH_INTERVAL seconds.
+
+        The connect-time status goes stale fast: wpa_sec_online is only health-checked
+        on connect, and pwnagotchi_mood is null until the first emotion event — the
+        app showed status=mood=null fields for entire sessions. This refresh pushes
+        the current mode/mood (via _send_status_message, which also reads _last_mood)
+        and re-checks wpa-sec reachability so the app's cracking row stays accurate.
+        """
+        while True:
+            try:
+                await asyncio.sleep(STATUS_REFRESH_INTERVAL)
+                if not self.app_connected or self.app_websocket is None:
+                    continue
+                try:
+                    if self._wpa_sec_status()[0]:
+                        self._wpa_sec_online = await asyncio.get_event_loop().run_in_executor(
+                            None, self._check_wpa_sec_online
+                        )
+                except Exception as e:
+                    log.debug(f"[pwn-companion] wpa-sec health check failed: {e}")
+                await self._send_status_message("periodic refresh")
+            except asyncio.CancelledError:
+                log.debug("[pwn-companion] Status refresh task cancelled")
+                break
+            except Exception as e:
+                log.error(
+                    f"[pwn-companion] Status refresh error: {type(e).__name__}: {str(e)[:LOG_STRING_TRUNCATE_LENGTH]}"
+                )
+                await asyncio.sleep(PERIODIC_TASK_RETRY_SLEEP)
 
     async def _handle_message(self, message: str):
         """Handle incoming WebSocket message from app"""

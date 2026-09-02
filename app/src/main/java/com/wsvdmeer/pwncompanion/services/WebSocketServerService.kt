@@ -155,6 +155,11 @@ class WebSocketServerService(
     private suspend fun handleWebSocketSession(session: WebSocketServerSession) {
         val sessionId = UUID.randomUUID().toString()
         var deviceName = "Device_$sessionId"
+        // Session diagnostics: 5 days of logs showed 15/17 disconnects with NO tether
+        // drop and NO error line — the socket just died silently. Recording how long
+        // the session lived and what ended it makes those deaths diagnosable.
+        val sessionStartMs = System.currentTimeMillis()
+        var endCause = "clean close"
 
         // Check max concurrent connections before accepting
         if (connectedClients.size >= 20) {
@@ -224,6 +229,7 @@ class WebSocketServerService(
                         }
                     }
                 } catch (e: Exception) {
+                    endCause = "${e.javaClass.simpleName}: ${e.message ?: "no detail"}"
                     Log.e(tag, "Error receiving message from $deviceName: ${e.message}")
                     break
                 }
@@ -232,12 +238,9 @@ class WebSocketServerService(
             connectedClients.remove(sessionId)
             clientSessions.remove(sessionId)
             onClientDisconnected(sessionId)
-            Log.i(tag, "═══════════════════════════════════════════")
-            Log.i(tag, "✗ CLIENT DISCONNECTED")
-            Log.i(tag, "  Device: $deviceName")
-            Log.i(tag, "  Session: $sessionId")
-            Log.i(tag, "  Remaining Clients: ${connectedClients.size}/20")
-            Log.i(tag, "═══════════════════════════════════════════")
+            val durationSec = (System.currentTimeMillis() - sessionStartMs) / 1000
+            Log.i(tag, "✗ CLIENT DISCONNECTED — session=${sessionId.take(8)} device=$deviceName " +
+                "lasted=${durationSec}s cause=$endCause remaining=${connectedClients.size}/20")
         }
     }
 

@@ -4,6 +4,56 @@ All significant changes to PwnCompanion, most recent first.
 
 ---
 
+## Session — 2026-09-02 (reconnect-driven reliability fixes)
+
+App `1.2.8` (build 14) · plugin `2.2.1`
+
+> Driven by a 5-day field log (`pwncompanion.log`, v1.2.7 build 13, 17,836 lines):
+> 17 connections → 17 unique device UUIDs, median session 93 s, 11/17 sessions
+> under 5 min, 15/17 disconnects silent (no tether drop, no error line), 244
+> duplicate `gps_received` acks, and zero exception lines in five days.
+> NOTE: authored on a stale v1.2.4 checkout, then rebased onto the v1.2.7 line
+> (which itself added the DiagnosticsLog this analysis was based on); build 14
+> sideloads over build 13.
+
+### Connection identity — the "every reconnect is a new device" fix
+
+| File | Change |
+|------|--------|
+| `NetworkService.kt` | DeviceState is now **retained on disconnect** (keyed by the resolved pwnagotchi name, TTL 24 h, max 8 entries) and **re-seeds the next session** via `retainDeviceState`/`seedFromRetained` — captures, telemetry, wpa-sec flags and file count now survive reconnects instead of being wiped with the session UUID |
+
+### Start/stop races
+
+| File | Change |
+|------|--------|
+| `NetworkService.kt` | `serverStarted` is now an `AtomicBoolean`; `start()` claims it via `compareAndSet` and `stop()` via `getAndSet` — concurrent triggers (BT monitor, 12 s health check, requestStart) can no longer race into two parallel binds (the log showed "WebSocket server bound" twice ~5 s apart, 6×) |
+| `NetworkService.kt` | `start()` re-checks after a successful bind: if `stop()` landed mid-DHCP-retry, the freshly bound server unbinds itself instead of running against the user's stop intent |
+| `NetworkService.kt` | `stop()` now resets `networkingDesired`/`_isServerRunning` even when the server wasn't running — a stop during the health-check recovery window no longer leaves the app rebinding |
+| `NetworkService.kt` | A throttled BT state change is **re-scheduled** just past the throttle window instead of being dropped until the next poll |
+
+### Disconnect diagnosability (was: silent deaths)
+
+| File | Change |
+|------|--------|
+| `WebSocketServerService.kt` | Disconnect log now records **session duration + end cause** (exception class/message) in one line — replaces the silent 15/17 deaths with `lasted=…s cause=…` |
+
+### Protocol noise
+
+| File | Change |
+|------|--------|
+| `OutgoingMessageQueue.kt` | Queued GPS messages are **coalesced per device** (newest wins) — the initial push + reconnect-flushed requests no longer pile up into ack bursts (244 duplicate `gps_received` in 5 days) |
+| `MessageHandler.kt` | Registered a DEBUG handler for the plugin's `command_received` ack (was falling into the "No handler registered" WARN path, clusters of 6 within 400 ms) |
+| `MessageHandler.kt` / `NetworkService.kt` | Per-request GPS logs demoted INFO→DEBUG (~12 lines/min of identical messages) |
+
+### Plugin (`pwn-companion.py`)
+
+| Change |
+|--------|
+| New `_periodic_status_refresh` task (every 300 s): re-sends full status with a fresh wpa-sec reachability check + current mood/mode — the connect-time status used to go stale (app showed `mood=null`, `wpaSec online=null` for whole sessions) |
+| New `capture_history_limit` plugin option (default 300) — the device held 647 capture files while the connect payload was hard-capped at 300 with no way to raise it |
+
+---
+
 ## v1.2.7 (build 13) — 2026-08-28
 
 App `1.2.7` (build 13) · plugin `2.2.0`
