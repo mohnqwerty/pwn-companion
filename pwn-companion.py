@@ -69,6 +69,7 @@ GPS Data Persistence:
 import logging
 import json
 import os
+import hashlib
 import asyncio
 import threading
 import socket
@@ -440,7 +441,7 @@ SO_BINDTODEVICE = 25  # Linux-specific socket option
 
 class PwnCompanion(Plugin):
     __author__ = "wsvdmeer"
-    __version__ = "2.2.1"
+    __version__ = "2.2.2"
     __description__ = "Device-side bridge to the PwnCompanion app: screen mirror, GPS, telemetry, captures, commands, and AI voice."
 
     csrf_exempt = True
@@ -2171,6 +2172,17 @@ class PwnCompanion(Plugin):
             except Exception as e:
                 log.error(f"[pwn-companion] post-clear history refresh failed: {e}")
 
+        # Sync result → the app's console log, so the [ sync ] button's outcome is visible.
+        if action == "sync_wpa_sec":
+            try:
+                uploaded = getattr(self, "_last_sync_uploaded", 0)
+                skipped = getattr(self, "_last_sync_skipped", 0)
+                await self._send_status_message(
+                    f"wpa-sec sync: {uploaded} uploaded, {skipped} already on server"
+                )
+            except Exception as e:
+                log.error(f"[pwn-companion] post-sync status failed: {e}")
+
     def execute_command(self, action: str, params: dict):
         """
         Execute a command received from the companion app.
@@ -2211,6 +2223,15 @@ class PwnCompanion(Plugin):
             elif action == "clear_captures":
                 # Wipe captured handshakes from disk (app already cleared its own cache).
                 self._clear_captures()
+            elif action == "sync_wpa_sec":
+                # On-demand full upload sweep, requested by the app's [ sync ] button:
+                # reconcile with wpa-sec's own list first (so already-submitted grabs
+                # aren't resent), then push everything crackable that's still missing.
+                self._reconcile_wpa_sec_uploaded()
+                uploaded, skipped = self._sweep_wpa_sec_uploads()
+                self._last_sync_uploaded = uploaded
+                self._last_sync_skipped = skipped
+                log.info(f"[pwn-companion] wpa-sec sync: {uploaded} uploaded, {skipped} already present")
             elif action == "delete_capture":
                 # Delete one capture's handshake files, matched by BSSID (in params "value").
                 self._delete_capture(params.get("value"))
@@ -2683,47 +2704,137 @@ class PwnCompanion(Plugin):
             return None
 
     def _maybe_upload_to_wpa_sec(self, path, quality):
-        """Upload a capture once it's crackable, and again if it later grows (bettercap
-        appends frames so a partial can become a full EAPOL). Never uploads partials.
-        Dedupes via a persisted basename->mtime map so a restart doesn't re-upload."""
+        """Upload a capture once it's crackable, and again only if the DERIVED HASH
+        changes (partial -> full EAPOL upgrade, or a new AP inside the same pcap).
+        Never uploads partials.
+
+        Dedup is a fingerprint of the `.22000` hash file, NOT the pcap mtime:
+        bettercap keeps appending frames to the same capture, so an mtime-based
+        check re-uploaded identical hashes — the duplicate submissions wpa-sec
+        saw. Legacy records (plain mtime floats) keep the old skip behaviour so
+        upgrading the plugin doesn't replay every historical upload.
+        Returns True only when an upload actually happened."""
         if not self._wpa_sec_upload_enabled or quality not in ("eapol", "pmkid"):
-            return
+            return False
         self._load_wpa_sec_uploaded()
+        base = capture_base(os.path.basename(path))
         try:
             mtime = os.path.getmtime(path)
         except OSError:
-            return
-        base = capture_base(os.path.basename(path))
-        if self._wpa_sec_uploaded.get(base) == mtime:
-            return
+            return False
+
+        rec = self._wpa_sec_uploaded.get(base)
+        if isinstance(rec, dict):
+            prior_fp = rec.get("fp")
+            prior_mtime = rec.get("mtime")
+            if prior_fp is not None:
+                # Content fingerprint: skip unless the hash itself changed.
+                current_fp = self._hash_fingerprint(capture_base(path))
+                if current_fp is None or current_fp == prior_fp:
+                    if prior_mtime != mtime:
+                        self._wpa_sec_uploaded[base] = {"fp": prior_fp, "mtime": mtime}
+                        self._save_wpa_sec_uploaded()
+                    return False
+            elif prior_mtime == mtime:
+                return False
+        elif rec == mtime:
+            # Legacy plain-float record + unchanged pcap → same behaviour as before.
+            return False
+
         result = self._upload_to_wpa_sec(path)
         if result is None or result.startswith("SKIP:"):
-            return
+            return False
         if result.startswith("ERROR"):
             # Bad key / server-side rejection — don't record, so a corrected key retries
             # on the next sweep instead of silently never uploading this file again.
             log.warning(f"[pwn-companion] wpa-sec upload {base}: {result}")
-            return
+            return False
         log.info(f"[pwn-companion] wpa-sec upload {base}: {result}")
-        self._wpa_sec_uploaded[base] = mtime
+        fingerprint = self._hash_fingerprint(capture_base(path))
+        if fingerprint is None:
+            # Upload succeeded but no local hash line — record by mtime alone so we
+            # at least know it went out (legacy semantics for this entry).
+            self._wpa_sec_uploaded[base] = {"fp": None, "mtime": mtime}
+        else:
+            self._wpa_sec_uploaded[base] = {"fp": fingerprint, "mtime": mtime}
         self._save_wpa_sec_uploaded()
+        return True
+
+    def _hash_fingerprint(self, base):
+        """md5 of the capture's `.22000` hash lines — None when the hash is absent.
+        Includes the extra frames a growing pcap adds, keyed to content not time."""
+        try:
+            with open(base + ".22000", "rb") as hf:
+                data = hf.read()
+            return hashlib.md5(data).hexdigest() if data else None
+        except OSError:
+            return None
+
+    def _reconcile_wpa_sec_uploaded(self):
+        """Seed the local upload map from wpa-sec's own submissions list, so captures
+        the STOCK wpa-sec plugin already submitted aren't re-submitted by our sweep
+        (two independent upload paths sharing one key was the duplicate-submission
+        source). Defensive: only basenames matching local captures are seeded, and
+        only when the response looks like the API's plain-text list (not a landing
+        page). Failures fall back to local-map-only behaviour."""
+        key = self._wpa_sec_key()
+        if not key:
+            return
+        try:
+            r = requests.get(
+                self._wpa_sec_api_url().rstrip("/") + "/?api&list&key=" + key, timeout=15
+            )
+            text = (r.text or "").strip()
+        except Exception as e:
+            log.debug(f"[pwn-companion] wpa-sec list fetch failed: {e}")
+            return
+        if not text or "<html" in text.lower():
+            return
+        dirpath = self.handshakes_dir
+        if not dirpath or not os.path.isdir(dirpath):
+            return
+        local = {capture_base(n) for n in os.listdir(dirpath) if is_capture_file(n)}
+        seeded = 0
+        for line in text.splitlines():
+            parts = line.strip().split()
+            if not parts:
+                continue
+            stem = capture_base(parts[0])
+            if stem and stem in local and stem not in self._wpa_sec_uploaded:
+                fp = self._hash_fingerprint(capture_base(os.path.join(dirpath, parts[0])))
+                try:
+                    mtime = os.path.getmtime(os.path.join(dirpath, parts[0]))
+                except OSError:
+                    mtime = 0.0
+                self._wpa_sec_uploaded[stem] = {"fp": fp, "mtime": mtime, "src": "server"}
+                seeded += 1
+        if seeded:
+            self._save_wpa_sec_uploaded()
+            log.info(f"[pwn-companion] wpa-sec reconcile seeded {seeded} already-submitted capture(s)")
 
     def _sweep_wpa_sec_uploads(self):
         """Re-classify every capture and upload the crackable ones. Catches files that
-        upgraded partial -> full EAPOL after their on_handshake event already fired."""
+        upgraded partial -> full EAPOL after their on_handshake event already fired.
+        Returns (uploaded, skipped) so the app-triggered sync can report real counts."""
+        uploaded = 0
+        skipped = 0
         try:
             directory = self.handshakes_dir
             if not directory or not os.path.isdir(directory):
-                return
+                return uploaded, skipped
             for name in os.listdir(directory):
                 if not is_capture_file(name):
                     continue
                 path = os.path.join(directory, name)
                 q = self._classify_pcap(path)   # cached; re-runs if the file grew
                 if q:
-                    self._maybe_upload_to_wpa_sec(path, q)
+                    if self._maybe_upload_to_wpa_sec(path, q):
+                        uploaded += 1
+                    else:
+                        skipped += 1
         except Exception as e:
             log.debug(f"[pwn-companion] wpa-sec upload sweep failed: {e}")
+        return uploaded, skipped
 
     async def _upload_capture_async(self, path, quality):
         """Schedule a blocking upload off the main loop (on_handshake is a hot path)."""

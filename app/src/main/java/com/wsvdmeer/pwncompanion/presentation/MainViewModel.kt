@@ -891,6 +891,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         appendLog("[>] wipe device handshakes → sent")
     }
 
+    /**
+     * Push every crackable capture to wpa-sec on demand (the [ sync ] button).
+     * The device's direct uploader reconciles with wpa-sec's own submissions list
+     * first, so captures the stock wpa-sec plugin already sent are skipped, not
+     * duplicated; everything crackable that's still missing goes out now. The
+     * device reports "wpa-sec sync: N uploaded, M already on server" back in the
+     * status line.
+     */
+    fun syncWpaSec() {
+        sendPwnagotchiCommand("sync_wpa_sec")
+        appendLog("[>] wpa-sec sync → sent")
+    }
+
     /** Remove a single capture from the phone (local cache + in-memory). A linked Pi resends it on
      *  its next scan; use [deleteDeviceCapture] to also delete the .pcap on the device. */
     fun forgetCapture(capture: CaptureEntry) {

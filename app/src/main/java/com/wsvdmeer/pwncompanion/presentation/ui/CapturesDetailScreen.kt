@@ -185,6 +185,17 @@ fun CapturesDetailScreen(
                     modifier = Modifier.clickable { viewModel.injectTestCapture() }
                 )
             }
+            // Push not-yet-submitted crackable grabs to wpa-sec on demand (reconciles with
+            // the server's own list first so nothing already sent goes out twice).
+            // Only shown when there's something crackable — otherwise it's dead chrome.
+            if (crackable > 0) {
+                Text(
+                    "[ sync ]",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, fontFamily = TerminalMono,
+                    maxLines = 1, softWrap = false,
+                    modifier = Modifier.clickable { viewModel.syncWpaSec() }
+                )
+            }
             // Clear/wipe captures (phone cache, or the Pi's handshakes too).
             Text(
                 "[ clear ]",

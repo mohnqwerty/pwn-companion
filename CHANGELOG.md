@@ -4,6 +4,26 @@ All significant changes to PwnCompanion, most recent first.
 
 ---
 
+## v1.2.9 (build 15) — 2026-09-02
+
+App `1.2.9` (build 15) · plugin `2.2.2`
+
+### wpa-sec — capture sync button + duplicate-submission fix
+
+Why duplicates reached wpa-sec: **two independent uploaders shared one key** — the stock
+wpa-sec plugin submits every capture with no `.22000` sidecar on `on_internet_available`,
+and pwn-companion's direct backstop submits crackable captures with its own mtime map —
+so a capture stock already pushed was re-pushed by the sweep, and bettercap's append-to-file
+behaviour re-pushed **identical hashes** whenever mtime changed.
+
+| Area | Detail |
+|------|--------|
+| Content-fingerprint dedup | Upload decision is now keyed to an md5 of the capture's `.22000` hash lines, not the pcap mtime — an appended-but-hash-identical capture is never re-submitted; only a real hash change (partial→full upgrade, new AP in the pcap) sends again. Legacy plain-mtime records keep old skip behaviour, so upgrading doesn't replay history |
+| Server reconcile | `?api&list` seeds the local map with captures **wpa-sec already has**, so the stock plugin's prior submissions are never duplicated by our sweep (defensive parse; falls back to local-map-only on any error) |
+| `[ sync ]` button | New action in the captures screen (shown when ≥1 crackable): device runs reconcile + full sweep now and reports `wpa-sec sync: N uploaded, M already on server` back in the status line |
+
+---
+
 ## Session — 2026-09-02 (reconnect-driven reliability fixes)
 
 App `1.2.8` (build 14) · plugin `2.2.1`
